@@ -18,6 +18,7 @@ import bisect
 import json
 import re
 import shutil
+import subprocess
 import threading
 import time
 import traceback
@@ -148,15 +149,48 @@ def style_key(name: Any) -> str:
 
 # --- sounds ----------------------------------------------------------------------------
 
+AUDIO_TYPES = (".mp3", ".m4a", ".aac", ".wav", ".ogg", ".opus", ".flac")
+VIDEO_TYPES = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v")
+
+
 def add_sound(src: Path, name: str) -> Dict[str, Any]:
-    """Keep a song you added, read its beats once, and remember them."""
-    analysis = beats.analyze(src)
+    """Keep a song you added (from a video file, only its sound), read its beats once, and remember them."""
+    suffix = Path(name).suffix.lower()
+    if suffix not in AUDIO_TYPES + VIDEO_TYPES:
+        raise ValueError("That file type isn't a song ClipAgent can read — use MP3, M4A, WAV, or a video file")
     SOUND_DIR.mkdir(parents=True, exist_ok=True)
-    sid_name = re.sub(r"[^\w.-]+", "_", Path(name).stem)[:60] or "sound"
-    dest = SOUND_DIR / f"{int(time.time())}_{sid_name}{src.suffix.lower() or '.mp3'}"
-    shutil.move(str(src), dest)
-    sid = store.add_sound(Path(name).stem[:80] or "Sound", str(dest), analysis["duration"], analysis)
+    stem = re.sub(r"[^\w.-]+", "_", Path(name).stem)[:60] or "sound"
+    if suffix in VIDEO_TYPES:
+        dest = SOUND_DIR / f"{int(time.time())}_{stem}.m4a"
+        proc = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vn", "-c:a", "aac", "-b:a", "192k",
+                               str(dest)], capture_output=True, text=True)
+        src.unlink(missing_ok=True)
+        if proc.returncode != 0 or not dest.is_file():
+            dest.unlink(missing_ok=True)
+            raise ValueError("That video has no sound ClipAgent can use as a song")
+    else:
+        dest = SOUND_DIR / f"{int(time.time())}_{stem}{suffix}"
+        shutil.move(str(src), dest)
+    try:
+        analysis = beats.analyze(dest)
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        raise ValueError(str(exc) if isinstance(exc, RuntimeError) else "Couldn't read the beats of that song") from exc
+    sid = store.add_sound(Path(name).stem[:80] or "Song", str(dest), analysis["duration"], analysis)
     return store.get_sound(sid)
+
+
+def delete_sound(sid: str) -> None:
+    sound = store.get_sound(sid)
+    if not sound:
+        raise ValueError("Song not found")
+    busy = [e for e in store.list_edits(200) if e["status"] in ("queued", "running")
+            and (e.get("settings") or {}).get("sound") == sid]
+    if busy:
+        raise ValueError("An edit with this song is being made right now — wait until it's done")
+    if sound.get("file"):
+        Path(sound["file"]).unlink(missing_ok=True)
+    store.delete_sound(sid)
 
 
 def sound_json(s: Dict[str, Any]) -> Dict[str, Any]:
@@ -647,8 +681,22 @@ def _at_or_before(grid: List[float], t: float, tol: float = 0.02) -> int:
 
 # --- the timeline -----------------------------------------------------------------------
 
-def _patterns(style: str, period: float) -> Tuple[List[int], int, List[int]]:
-    """How many beats each cut lasts: before the drop, the drop's hold, after the drop."""
+PACES = {"slower": -1, "normal": 0, "faster": 1}
+FLASHES = {"few": "Only on the drop", "normal": "As the style does", "many": "On every cut"}
+
+
+def _patterns(style: str, period: float, pace: int = 0) -> Tuple[List[int], int, List[int]]:
+    """How many beats each cut lasts: before the drop, the drop's hold, after the drop —
+    halved for "faster", doubled for "slower"."""
+    build, hold, after = _base_patterns(style, period)
+    if pace > 0:
+        return [max(1, b // 2) for b in build], max(2, hold // 2), [max(1, a // 2) for a in after]
+    if pace < 0:
+        return [min(8, b * 2) for b in build], min(16, hold * 2), [min(8, a * 2) for a in after]
+    return build, hold, after
+
+
+def _base_patterns(style: str, period: float) -> Tuple[List[int], int, List[int]]:
     if style == "velocity":
         fast = period < 0.545                                # above ~110 BPM
         return [2], (4 if 4 * period <= 2.4 else 2), ([2, 2, 2, 1, 1] if fast else [2, 1, 1, 2, 1, 1])
@@ -738,7 +786,7 @@ def _seg(m: Dict[str, Any], at: float, dur: float, curve: List[List[float]], **k
     return seg
 
 
-def _beat_cuts(style: str, length: float, analysis: Dict[str, Any], notes: List[str]) -> Dict[str, Any]:
+def _beat_cuts(style: str, length: float, analysis: Dict[str, Any], notes: List[str], pace: int = 0) -> Dict[str, Any]:
     """Where a beat edit cuts on this song: the song section, the drop, and every slot (in beats)."""
     st = STYLES[style]
     g = beat_grid(analysis)
@@ -761,7 +809,7 @@ def _beat_cuts(style: str, length: float, analysis: Dict[str, Any], notes: List[
     if not 0 <= kd < want - 2:
         kd = min(want - 4, 8)
         notes.append("This song has no clear drop in the part used, so the strongest moment lands on bar 3.")
-    build, hold, after = _patterns(style, period)
+    build, hold, after = _patterns(style, period, pace)
     cuts, k, i = [0], 0, 0
     while k < kd:
         k = min(kd, k + build[i % len(build)])
@@ -782,19 +830,20 @@ def _beat_cuts(style: str, length: float, analysis: Dict[str, Any], notes: List[
             "s0": grid[start_i], "slots": slots, "ds": next(j for j, (a, _) in enumerate(slots) if a == kd)}
 
 
-def slots_for(style: str, sound: Optional[Dict[str, Any]], length: float) -> Optional[Tuple[int, int]]:
+def slots_for(style: str, sound: Optional[Dict[str, Any]], length: float, pace: int = 0) -> Optional[Tuple[int, int]]:
     """For a beat edit: (shots before the drop, shots in all)."""
     analysis = (sound or {}).get("analysis") or {}
     if STYLES[style_key(style)]["pace"] != "beat" or len(analysis.get("beats") or []) < 4:
         return None
-    c = _beat_cuts(style_key(style), length, analysis, [])
+    c = _beat_cuts(style_key(style), length, analysis, [], pace)
     return c["ds"], len(c["slots"])
 
 
 def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, analysis: Dict[str, Any],
-                   fx: Dict[str, bool], durations: Dict[str, float], notes: List[str]) -> Dict[str, Any]:
+                   fx: Dict[str, bool], durations: Dict[str, float], notes: List[str], pace: int = 0,
+                   flashes: str = "normal") -> Dict[str, Any]:
     st = STYLES[style]
-    c = _beat_cuts(style, length, analysis, notes)
+    c = _beat_cuts(style, length, analysis, notes, pace)
     grid, period, start_i, want, kd, s0 = c["grid"], c["period"], c["start_i"], c["want"], c["kd"], c["s0"]
     slots, ds = c["slots"], c["ds"]
     drop_i = start_i + kd
@@ -852,8 +901,13 @@ def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, ana
                 elif style == "flow" and (on_bar or is_drop):
                     seg["pulses"] = [0.0]
             if fx.get("flash"):
-                big = is_drop or (on_bar and ka > 0 and (style == "velocity" or
-                                                         (style == "flow" and (ka - kd) % 16 == 0)))
+                if flashes == "many":
+                    big = is_drop or (ka > 0 and n == 0)
+                elif flashes == "few":
+                    big = is_drop
+                else:
+                    big = is_drop or (on_bar and ka > 0 and (style == "velocity" or
+                                                             (style == "flow" and (ka - kd) % 16 == 0)))
                 if big:
                     seg["flashes"] = [0.0]
             if fx.get("shake") and (is_drop or (style == "flow" and on_bar and ka > 0)):
@@ -883,7 +937,8 @@ def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, ana
 
 
 def _speech_timeline(ordered: List[Dict[str, Any]], style: str, length: float, analysis: Optional[Dict[str, Any]],
-                     fx: Dict[str, bool], durations: Dict[str, float], notes: List[str]) -> Dict[str, Any]:
+                     fx: Dict[str, bool], durations: Dict[str, float], notes: List[str],
+                     flashes: str = "normal") -> Dict[str, Any]:
     st = STYLES[style]
     drop_m = next((m for m in ordered if m.get("drop")), None)
     # whole moments, in order, as many as fit (the drop moment always plays)
@@ -981,8 +1036,8 @@ def _speech_timeline(ordered: List[Dict[str, Any]], style: str, length: float, a
                 seg["pulses"] = [seg["hit"]]
             if fx.get("shake"):
                 seg["shakes"] = [seg["hit"]]
-        if seg["drop"] and fx.get("flash"):
-            seg["flashes"] = [seg["hit"]]
+        if fx.get("flash") and (seg["drop"] or (flashes == "many" and n > 0)):
+            seg["flashes"] = [seg["hit"]] if seg["drop"] else [0.0]
     return result
 
 
@@ -1008,7 +1063,7 @@ def build_timeline(moments: List[Dict[str, Any]], style: str, length: float,
                    words_by_source: Dict[str, List[Dict[str, Any]]],
                    voice_level: Optional[float] = None, music_level: Optional[float] = None,
                    durations: Optional[Dict[str, float]] = None, grade: Optional[str] = None,
-                   hook: str = "") -> Dict[str, Any]:
+                   hook: str = "", pace: Any = 0, flashes: str = "normal") -> Dict[str, Any]:
     """Where every moment sits in the edit: cut on the beat, the best one on the drop, ending on a bar line."""
     style = style_key(style)
     st = STYLES[style]
@@ -1023,13 +1078,16 @@ def build_timeline(moments: List[Dict[str, Any]], style: str, length: float,
             m["drop"] = i == first
     notes: List[str] = []
     durations = durations or {}
+    pace = PACES.get(pace, pace) if isinstance(pace, str) else int(pace or 0)
+    pace = max(-1, min(1, pace))
+    flashes = flashes if flashes in FLASHES else "normal"
     if st["pace"] == "beat":
         if not analysis or not analysis.get("beats"):
             raise ValueError(f"{_a(st['name'])} edit is cut to music — pick a song first")
-        built = _beat_timeline(ordered, style, float(length), analysis, fx, durations, notes)
+        built = _beat_timeline(ordered, style, float(length), analysis, fx, durations, notes, pace, flashes)
     else:
         built = _speech_timeline(ordered, style, float(length), analysis if analysis and analysis.get("beats")
-                                 else None, fx, durations, notes)
+                                 else None, fx, durations, notes, flashes)
     segments = built["segments"]
     motion = {m["id"]: m.get("motion") for m in ordered}
     for i, seg in enumerate(segments):
@@ -1071,6 +1129,48 @@ def durations_for(source_ids: List[str]) -> Dict[str, float]:
     return {sid: float((store.get_job(sid) or {}).get("duration") or 0) or 1e9 for sid in set(source_ids)}
 
 
+def _rules(settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    camp = store.get_campaign(settings.get("campaign_id") or "") if settings.get("campaign_id") else None
+    return camp["rulebook"] if camp else None
+
+
+def campaign_fit(rules: Dict[str, Any], style: str) -> Tuple[Dict[str, bool], List[str], str]:
+    """What a campaign's brief lets an edit do: (effects it forces off, notes saying why, a refusal or "")."""
+    from . import campaign
+    r = campaign.resolve(rules)
+    ok = r["allowed"]
+    name = r["name"] or "This campaign"
+    st = STYLES[style_key(style)]
+    if not ok["stitch"]:
+        return {}, [], (f"{name}: the brief doesn't allow joining different moments, and an edit is made of several. "
+                        "If the brief allows it, switch “Join different moments” on in the campaign's rules — "
+                        "or make clips instead.")
+    if not ok["crop"]:
+        return {}, [], (f"{name}: the brief doesn't allow cropping the picture, and an edit is cut to vertical. "
+                        "Make clips with the whole frame kept instead.")
+    off: Dict[str, bool] = {}
+    notes: List[str] = []
+    if not ok["speed"]:
+        off.update(ramp=False, slowmo=False, smooth=False)
+        notes.append(f"{name}: the brief doesn't allow speed changes, so slow-mo and speed ramps are off. "
+                     "If it does, switch “Speed changes” on in the campaign's rules.")
+    if not ok["zoom"]:
+        off.update(pulse=False, shake=False, push=False)
+        notes.append(f"{name}: the brief doesn't allow zooms or camera moves, so zoom punches, shake and push-ins "
+                     "are off.")
+    if not ok["hook"]:
+        off.update(text=False)
+        notes.append(f"{name}: the brief doesn't allow text on screen, so the edit has none.")
+    elif not ok["captions"] and st["text"] in ("subtitle", "build"):
+        off.update(text=False)
+        notes.append(f"{name}: the brief doesn't allow captions, so his words aren't shown.")
+    if not ok["borders"]:
+        off.update(letterbox=False)
+    if r["captions_required"] and st["text"] not in ("subtitle", "build"):
+        notes.append(f"{name}: the brief requires captions — pick Cinematic or Motivation, which show his words.")
+    return off, notes, ""
+
+
 def check_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Check an edit request; return it cleaned, or raise ValueError in plain words."""
     from . import campaign
@@ -1088,6 +1188,8 @@ def check_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     sound = store.get_sound(settings.get("sound") or "") if settings.get("sound") else None
     if settings.get("sound") and not sound:
         raise ValueError("That song isn't in your songs any more — pick another one")
+    if sound and not Path(sound.get("file") or "").is_file():
+        raise ValueError(f"The file for “{sound['name']}” is missing — add the song again")
     if st.get("needs_music") and not sound:
         raise ValueError(f"{_a(st['name'])} edit is cut to music — add or pick a song first")
     camp_id = str(settings.get("campaign_id") or "")
@@ -1095,6 +1197,9 @@ def check_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
         camp = store.get_campaign(camp_id)
         if not camp:
             raise ValueError("That campaign doesn't exist any more")
+        _, _, refusal = campaign_fit(camp["rulebook"], style)
+        if refusal:
+            raise ValueError(refusal)
         if sound and not campaign.allowed(camp["rulebook"], "music"):
             raise ValueError(f"{camp['name']}: the brief doesn't allow added music. If it does, switch music on in "
                              "the campaign's rules" + (", or pick “No music”." if st.get("music_optional") else
@@ -1104,25 +1209,46 @@ def check_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
         length = int(settings.get("length") or st["length"])
     except (TypeError, ValueError):
         length = st["length"]
-    return {"style": style, "sources": sources, "sound": sound["id"] if sound else "",
-            "theme": str(settings.get("theme") or "")[:300], "length": max(10, min(60, length)),
-            "effects": {k: bool(v) for k, v in (settings.get("effects") or {}).items() if k in EFFECTS},
-            "grade": settings.get("grade") if settings.get("grade") in GRADES else "",
-            "campaign_id": camp_id}
+    out = {"style": style, "sources": sources, "sound": sound["id"] if sound else "",
+           "theme": str(settings.get("theme") or "")[:300], "length": max(10, min(60, length)),
+           "effects": {k: bool(v) for k, v in (settings.get("effects") or {}).items() if k in EFFECTS},
+           "grade": settings.get("grade") if settings.get("grade") in GRADES else "",
+           "pace": settings.get("pace") if settings.get("pace") in PACES else "normal",
+           "flashes": settings.get("flashes") if settings.get("flashes") in FLASHES else "normal",
+           "campaign_id": camp_id}
+    for key in ("voice", "music"):
+        if settings.get(key) is not None:
+            out[key] = max(0.0, min(1.5, float(settings[key])))
+    return out
 
 
-def create(settings: Dict[str, Any]) -> str:
-    """Check the request and start making the edit in the background."""
+def create(settings: Dict[str, Any], plan: Optional[Dict[str, Any]] = None, title: str = "") -> str:
+    """Check the request and start making the edit in the background. A `plan`
+    (moments already chosen) skips Claude — used for versions and for moments
+    sent from elsewhere."""
     clean = check_settings(settings)
     titles = [(store.get_job(s) or {}).get("title") or "" for s in clean["sources"]]
-    eid = store.create_edit(f"{STYLES[clean['style']]['name']} edit — {titles[0][:50]}", clean,
+    eid = store.create_edit(title or f"{STYLES[clean['style']]['name']} edit — {titles[0][:50]}", clean,
                             clean["campaign_id"])
-    threading.Thread(target=run, args=(eid,), daemon=True).start()
+    if plan:
+        store.update_edit(eid, plan=plan)
+    threading.Thread(target=run, args=(eid, not (plan and plan.get("moments"))), daemon=True).start()
     return eid
 
 
 def _stage(eid: str, stage: str, progress: int) -> None:
     store.update_edit(eid, stage=stage, progress=max(0, min(100, progress)), status="running")
+
+
+def _post(rules: Optional[Dict[str, Any]], caption: str, tags: List[str]) -> Dict[str, Any]:
+    """What to paste when posting: a campaign's own lines and hashtags first, when it's for one."""
+    from . import campaign
+    if rules:
+        return campaign.build_post(rules, 0, "", extra=caption, own_tags=tags)
+    tags = [t.lstrip("#") for t in tags if t]
+    tail = " ".join("#" + t for t in tags)
+    return {"text": (caption + ("\n\n" + tail if tail else "")).strip(), "caption": caption, "hashtags": tags,
+            "mentions": [], "line": "", "platform": "", "checklist": []}
 
 
 def plan_edit(eid: str, repick: bool) -> Dict[str, Any]:
@@ -1132,45 +1258,53 @@ def plan_edit(eid: str, repick: bool) -> Dict[str, Any]:
     s = edit["settings"]
     plan = dict(edit.get("plan") or {})
     sources = [x for x in (store.get_job(j) for j in s["sources"]) if x]
-    rules = None
-    if s.get("campaign_id"):
-        camp = store.get_campaign(s["campaign_id"])
-        rules = camp["rulebook"] if camp else None
+    rules = _rules(s)
     words = words_for_sources([x["id"] for x in sources])
+    sound = store.get_sound(s.get("sound") or "") if s.get("sound") else None
     if repick or not plan.get("moments"):
         _stage(eid, "Picking the moments", 8)
-        sound = store.get_sound(s.get("sound") or "") if s.get("sound") else None
         picked = pick_moments(sources, s["style"], s.get("theme", ""), s["length"],
                               campaign.picker_guidance(rules) if rules else "", plan.get("candidates"), sound)
         snap_moments(picked["moments"], s["style"], words)
-        tags = picked["hashtags"]
-        if rules:
-            must = [h.get("text", "") if isinstance(h, dict) else str(h)
-                    for h in ((rules.get("caption") or {}).get("hashtags") or [])]
-            must = [t.lstrip("#") for t in must if t]
-            tags = must + [t for t in tags if t.lower() not in {x.lower() for x in must}]
         plan.update({"moments": picked["moments"], "title": picked["title"], "hook": picked["hook"],
-                     "pick_notes": picked["notes"]})
+                     "pick_notes": picked["notes"], "post": _post(rules, picked["caption"], picked["hashtags"])})
         if s["style"] == "flow":
-            plan["moments"], more = match_motion(eid, plan["moments"], sources, sound, s["length"])
+            plan["moments"], more = match_motion(eid, plan["moments"], sources, sound, s["length"],
+                                                 s.get("pace", "normal"))
             plan["pick_notes"] = plan["pick_notes"] + more
-        store.update_edit(eid, title=picked["title"] or edit["title"], caption=picked["caption"],
-                          hashtags=tags[:10])
-    _stage(eid, "Fitting it to the beat", 22)
-    sound = store.get_sound(s.get("sound") or "") if s.get("sound") else None
-    timeline = build_timeline(plan["moments"], s["style"], s["length"], sound, s.get("effects") or {}, words,
+        store.update_edit(eid, title=picked["title"] or edit["title"], caption=plan["post"]["caption"],
+                          hashtags=plan["post"]["hashtags"])
+    if not plan.get("post"):
+        plan["post"] = _post(rules, edit.get("caption") or "", edit.get("hashtags") or [])
+    fx = dict(s.get("effects") or {})
+    fit_notes: List[str] = []
+    if rules:
+        off, fit_notes, refusal = campaign_fit(rules, s["style"])
+        if refusal:
+            raise ValueError(refusal)
+        fx.update(off)
+        said = (plan.get("hook") or "", plan["post"].get("caption") or "")
+        if plan.get("tone_for") != list(said):            # the words changed: check them against the brief again
+            _stage(eid, "Checking the words against the campaign's rules", 20)
+            tone = campaign.check_text(rules, [{"id": 0, "hook": said[0],
+                                                "extra": said[1].replace(plan["post"].get("line") or "", "").strip()}])
+            plan["tone"], plan["tone_for"] = tone.get(0), list(said)
+    _stage(eid, "Fitting it to the beat" if sound else "Laying out the moments", 22)
+    timeline = build_timeline(plan["moments"], s["style"], s["length"], sound, fx, words,
                               s.get("voice"), s.get("music"), durations_for(s["sources"]), s.get("grade"),
-                              plan.get("hook", ""))
+                              plan.get("hook", ""), s.get("pace", "normal"), s.get("flashes", "normal"))
+    timeline["notes"] = fit_notes + timeline["notes"]
     plan["timeline"] = timeline
     store.update_edit(eid, plan=plan)
     return plan
 
 
 def match_motion(eid: str, moments: List[Dict[str, Any]], sources: List[Dict[str, Any]],
-                 sound: Optional[Dict[str, Any]], length: float) -> Tuple[List[Dict[str, Any]], List[str]]:
+                 sound: Optional[Dict[str, Any]], length: float,
+                 pace: Any = "normal") -> Tuple[List[Dict[str, Any]], List[str]]:
     """Flow: measure how every shot moves and chain them so each cut carries the motion on."""
     _stage(eid, "Matching the movement between shots", 14)
-    fit = slots_for("flow", sound, length)
+    fit = slots_for("flow", sound, length, PACES.get(pace, 0) if isinstance(pace, str) else int(pace or 0))
     paths = {x["id"]: Path(x["source_path"]) for x in sources}
     durs = {x["id"]: float(x.get("duration") or 0) or 1e9 for x in sources}
     return motionmatch.order(moments, paths, durs, keep=fit[1] if fit else None, drop_at=fit[0] if fit else None,
@@ -1178,8 +1312,24 @@ def match_motion(eid: str, moments: List[Dict[str, Any]], sources: List[Dict[str
                                                        14 + int(p * 0.07)))
 
 
+def gate(eid: str) -> Optional[Dict[str, Any]]:
+    """A campaign edit's check against its brief, stored on the edit (None when it isn't for a campaign)."""
+    from . import compliance
+    edit = store.get_edit(eid) or {}
+    rules = _rules(edit.get("settings") or {})
+    plan = edit.get("plan") or {}
+    if not rules or not edit.get("file") or not plan.get("timeline"):
+        return None
+    tl = plan["timeline"]
+    result = compliance.check_edit(rules, tl, Path(edit["file"]), plan.get("post") or {},
+                                   (tl.get("hook") or {}).get("text", ""), plan.get("tone"))
+    store.update_edit(eid, compliance=result)
+    return result
+
+
 def run(eid: str, repick: bool = True) -> None:
-    """Pick (unless re-making), lay out, render. Never raises: a failure is stored on the edit."""
+    """Pick (unless re-making), lay out, render, check. Never raises: a failure is stored on the edit,
+    and the last good video stays."""
     from . import editrender, notify
     with _lock:
         try:
@@ -1193,24 +1343,77 @@ def run(eid: str, repick: bool = True) -> None:
             out = EDIT_DIR / f"{eid}.mp4"
             thumb = EDIT_DIR / f"{eid}.jpg"
             editrender.render(plan["timeline"], sources, sound, out, thumb,
-                              progress=lambda p: _stage(eid, f"Rendering — {p}%", 25 + int(p * 0.73)))
-            store.update_edit(eid, status="done", stage="Done", progress=100, file=str(out), thumb=str(thumb),
-                              error="")
+                              progress=lambda p: _stage(eid, f"Rendering — {p}%", 25 + int(p * 0.7)))
+            store.update_edit(eid, file=str(out), thumb=str(thumb), stage="Checking it", progress=97)
+            verdict = gate(eid)
+            store.update_edit(eid, status="done", stage="Done", progress=100, error="")
             edit = store.get_edit(eid) or {}
             if notify.connected():
-                tags = " ".join("#" + t for t in edit.get("hashtags") or [])
-                notify.send_video(out, f"🎬 <b>{notify.esc(edit.get('title') or 'Your edit')}</b> is ready\n"
-                                       f"{notify.esc(edit.get('caption') or '')}\n{notify.esc(tags)}",
-                                  plan["timeline"]["length"])
+                post = (edit.get("plan") or {}).get("post") or {}
+                lines = [f"🎬 <b>{notify.esc(edit.get('title') or 'Your edit')}</b> is ready"]
+                if verdict:
+                    lines.append({"ready": "✅ ", "check": "🟡 ", "blocked": "⛔ "}.get(verdict["status"], "")
+                                 + notify.esc(verdict["summary"]))
+                if post.get("text"):
+                    lines.append(notify.esc(post["text"]))
+                notify.send_video(out, "\n".join(lines)[:1000], plan["timeline"]["length"])
         except Exception as exc:
             traceback.print_exc()
             store.update_edit(eid, status="failed", stage="Failed", error=str(exc)[:400], progress=100)
+            if notify.connected():
+                edit = store.get_edit(eid) or {}
+                notify.send(f"❌ The edit <b>{notify.esc(edit.get('title') or '')}</b> didn't work: "
+                            f"{notify.esc(str(exc)[:300])}")
+
+
+# --- changing an edit ------------------------------------------------------------------
+
+def _undo_dir() -> Path:
+    d = EDIT_DIR / "undo"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def snapshot(eid: str) -> bool:
+    """Keep the current version (its settings, moments and video) so the next change can be undone."""
+    edit = store.get_edit(eid)
+    if not edit or not edit.get("file") or not Path(edit["file"]).is_file():
+        return False
+    d = _undo_dir()
+    shutil.copyfile(edit["file"], d / f"{eid}.mp4")
+    if edit.get("thumb") and Path(edit["thumb"]).is_file():
+        shutil.copyfile(edit["thumb"], d / f"{eid}.jpg")
+    store.update_edit(eid, undo={"settings": edit["settings"], "plan": edit.get("plan") or {},
+                                 "title": edit.get("title"), "caption": edit.get("caption"),
+                                 "hashtags": edit.get("hashtags") or [], "compliance": edit.get("compliance")})
+    return True
+
+
+def undo(eid: str) -> Dict[str, Any]:
+    edit = store.get_edit(eid)
+    if not edit:
+        raise ValueError("Edit not found")
+    if edit["status"] in ("queued", "running"):
+        raise ValueError("This edit is still being made — wait a moment")
+    prev = edit.get("undo") or {}
+    d = _undo_dir()
+    if not prev or not (d / f"{eid}.mp4").is_file():
+        raise ValueError("There's nothing to undo")
+    EDIT_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(d / f"{eid}.mp4"), EDIT_DIR / f"{eid}.mp4")
+    if (d / f"{eid}.jpg").is_file():
+        shutil.move(str(d / f"{eid}.jpg"), EDIT_DIR / f"{eid}.jpg")
+    store.update_edit(eid, settings=prev["settings"], plan=prev["plan"], title=prev.get("title") or edit["title"],
+                      caption=prev.get("caption") or "", hashtags=prev.get("hashtags") or [],
+                      compliance=prev.get("compliance"), undo=None, status="done", stage="Done", progress=100,
+                      error="", file=str(EDIT_DIR / f"{eid}.mp4"), thumb=str(EDIT_DIR / f"{eid}.jpg"))
+    return store.get_edit(eid)
 
 
 def remake(eid: str, changes: Dict[str, Any]) -> None:
-    """Apply changes from the edit page (style, song, effects, levels, order,
+    """Apply changes from the edit page (style, song, effects, levels, pace, order,
     moments off or on, new text) and render again — Claude only when asked
-    for new moments."""
+    for new moments. The current version is kept for Undo."""
     edit = store.get_edit(eid)
     if not edit:
         raise ValueError("Edit not found")
@@ -1227,24 +1430,27 @@ def remake(eid: str, changes: Dict[str, Any]) -> None:
     if isinstance(changes.get("effects"), dict):
         s["effects"] = {**(s.get("effects") or {}),
                         **{k: bool(v) for k, v in changes["effects"].items() if k in EFFECTS}}
-    if "grade" in changes:
-        s["grade"] = changes["grade"] or ""
+    for key in ("grade", "pace", "flashes", "theme"):
+        if key in changes and changes[key] is not None:
+            s[key] = changes[key]
     for key in ("voice", "music"):
         if changes.get(key) is not None:
             s[key] = max(0.0, min(1.5, float(changes[key])))
-    if changes.get("theme") is not None:
-        s["theme"] = str(changes["theme"])[:300]
     checked = check_settings(s)                               # same rules as a new edit (music, campaign…)
-    checked.update({k: s[k] for k in ("voice", "music") if k in s})
     if changes.get("hook") is not None:
         plan["hook"] = re.sub(r"\s+", " ", str(changes["hook"])).strip()[:90]
+    if changes.get("caption") is not None or changes.get("hashtags") is not None:
+        post = plan.get("post") or {}
+        caption = str(changes["caption"]) if changes.get("caption") is not None else post.get("caption", "")
+        tags = changes.get("hashtags") if isinstance(changes.get("hashtags"), list) else post.get("hashtags", [])
+        plan["post"] = _post(_rules(checked), caption[:600], [str(t) for t in tags][:12])
     moments = plan.get("moments") or []
     if isinstance(changes.get("moments"), list):
         by_id = {m["id"]: m for m in moments}
         new = []
         for m in changes["moments"]:
             base = by_id.get(m.get("id"))
-            if not base:
+            if not base or base in new:
                 continue
             base = dict(base)
             if "text" in m:
@@ -1268,8 +1474,268 @@ def remake(eid: str, changes: Dict[str, Any]) -> None:
     if not repick and checked["style"] != edit["settings"].get("style") and \
             STYLES[checked["style"]]["pace"] != STYLES[style_key(edit["settings"].get("style"))]["pace"]:
         repick = True                                          # speech moments and beat moments differ
+    if not repick and checked["style"] == "flow" and edit["settings"].get("style") != "flow":
+        repick = True                                          # Flow needs its own short, moving shots
+    if isinstance(changes.get("_ask"), dict):
+        plan["asks"] = (plan.get("asks") or [])[-9:] + [changes["_ask"]]
+    snapshot(eid)
     store.update_edit(eid, settings=checked, plan=plan, status="queued", stage="Waiting", progress=0, error="")
+    if plan.get("post") and not repick:
+        store.update_edit(eid, caption=plan["post"].get("caption", ""), hashtags=plan["post"].get("hashtags", []))
     threading.Thread(target=run, args=(eid, repick), daemon=True).start()
+
+
+def versions(eid: str, sound_ids: List[str]) -> List[str]:
+    """The same edit cut to other songs — same moments and words, no new Claude call — so you can
+    post each and see which song does better."""
+    edit = store.get_edit(eid)
+    if not edit:
+        raise ValueError("Edit not found")
+    plan = edit.get("plan") or {}
+    if not plan.get("moments"):
+        raise ValueError("Wait until the edit is made, then make versions of it")
+    made = []
+    for sid in [x for x in sound_ids if x != edit["settings"].get("sound")][:5]:
+        sound = store.get_sound(sid) if sid else None
+        if sid and not sound:
+            continue
+        keep = {k: plan[k] for k in ("moments", "title", "hook", "post", "pick_notes", "tone", "tone_for") if k in plan}
+        name = sound["name"] if sound else "no music"
+        made.append(create({**edit["settings"], "sound": sid}, keep, f"{edit['title'][:70]} · {name}"))
+    if not made:
+        raise ValueError("Pick at least one other song")
+    return made
+
+
+def delete(eid: str) -> None:
+    edit = store.get_edit(eid)
+    if not edit:
+        raise ValueError("Edit not found")
+    if edit["status"] in ("queued", "running"):
+        raise ValueError("This edit is still being made — wait until it's done, then delete it")
+    for p in [EDIT_DIR / f"{eid}.mp4", EDIT_DIR / f"{eid}.jpg", EDIT_DIR / "undo" / f"{eid}.mp4",
+              EDIT_DIR / "undo" / f"{eid}.jpg"] + list((EDIT_DIR / "moments").glob(f"{eid}_*.jpg")):
+        if p.is_file():
+            p.unlink()
+    store.delete_edit(eid)
+
+
+def set_post(eid: str, caption: str, tags: List[str]) -> None:
+    """New words to post with (no re-render). For a campaign, checked against the brief again."""
+    from . import campaign
+    edit = store.get_edit(eid)
+    if not edit:
+        raise ValueError("Edit not found")
+    if edit["status"] in ("queued", "running"):
+        raise ValueError("This edit is still being made — wait a moment")
+    rules = _rules(edit["settings"])
+    plan = dict(edit.get("plan") or {})
+    plan["post"] = _post(rules, caption.strip()[:600], [t.strip().lstrip("#") for t in tags if t.strip()][:12])
+    if rules:
+        said = [plan.get("hook") or "", plan["post"].get("caption") or ""]
+        tone = campaign.check_text(rules, [{"id": 0, "hook": said[0],
+                                            "extra": said[1].replace(plan["post"].get("line") or "", "").strip()}])
+        plan["tone"], plan["tone_for"] = tone.get(0), said
+    store.update_edit(eid, plan=plan, caption=plan["post"]["caption"], hashtags=plan["post"]["hashtags"])
+    gate(eid)
+
+
+def moment_thumb(eid: str, mid: str) -> Optional[Path]:
+    """A small picture of a moment (its hit), made once and kept."""
+    edit = store.get_edit(eid) or {}
+    m = next((x for x in (edit.get("plan") or {}).get("moments") or [] if x["id"] == mid), None)
+    job = store.get_job(m["source"]) if m else None
+    if not m or not job or not Path(job.get("source_path") or "").is_file():
+        return None
+    d = EDIT_DIR / "moments"
+    d.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^\w]", "", mid)
+    out = d / f"{eid}_{safe}_{int(float(m['hit']) * 10)}.jpg"
+    if not out.is_file():
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{float(m['hit']):.2f}", "-i", job["source_path"],
+                        "-frames:v", "1", "-vf", "scale=-2:320,crop='min(iw,ih*9/16)':ih", "-q:v", "4", str(out)],
+                       capture_output=True)
+    return out if out.is_file() else None
+
+
+def settle_interrupted() -> None:
+    """Edits still marked running when the app starts were cut off by a restart: say so."""
+    for e in store.list_edits(200):
+        if e["status"] in ("running", "queued"):
+            store.update_edit(e["id"], status="failed", stage="Failed", progress=100,
+                              error="ClipAgent was closed or restarted while this edit was being made. "
+                                    "Press Re-make — your moments are kept.")
+
+
+# --- typed changes ("faster", "black and white", "put the $20M line on the drop") ------------
+
+ASK_TOOL = {
+    "name": "change_edit",
+    "description": "Turn the person's request into changes to their edit.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "understood": {"type": "string", "description": "1-2 friendly, plain sentences to them: what you will "
+                           "change. No jargon, no field names."},
+            "question": {"type": "string", "description": "Only when you truly can't tell what they want: one "
+                         "short question. Then change nothing."},
+            "cant": {"type": "array", "items": {"type": "string"}, "description": "Each thing asked that the edit "
+                     "maker can't do, in plain words, with the closest thing it can do."},
+            "style": {"type": "string", "enum": list(STYLES)},
+            "song": {"type": "string", "description": "The exact name of one of their songs, or \"none\" for no music."},
+            "length": {"type": "integer", "enum": list(LENGTHS)},
+            "pace": {"type": "string", "enum": list(PACES), "description": "How fast it cuts: faster = more cuts."},
+            "flashes": {"type": "string", "enum": list(FLASHES), "description": "few = only on the drop; many = on "
+                        "every cut."},
+            "effects": {"type": "object", "description": "Effects to switch on (true) or off (false).",
+                        "properties": {k: {"type": "boolean", "description": v} for k, v in EFFECTS.items()}},
+            "grade": {"type": "string", "enum": list(GRADES), "description": "The colour look: " +
+                      ", ".join(f"{k} = {v}" for k, v in GRADES.items())},
+            "voice": {"type": "number", "description": "His voice level 0-1.5 (0 = off, 1 = normal)."},
+            "music": {"type": "number", "description": "Music level 0-1.5 (1 = normal)."},
+            "hook": {"type": "string", "description": "New text for the first 3 seconds (max 9 words), only from "
+                     "what he says."},
+            "caption": {"type": "string", "description": "New caption to post with."},
+            "moments": {"type": "array", "description": "ALL the moments, in the new playing order, when the order, "
+                        "the drop, a moment's words or which are on changes.",
+                        "items": {"type": "object", "properties": {
+                            "id": {"type": "string"}, "text": {"type": "string"}, "off": {"type": "boolean"},
+                            "drop": {"type": "boolean", "description": "true for the ONE moment on the drop."}},
+                            "required": ["id"]}},
+            "repick": {"type": "boolean", "description": "true only when they want different moments that aren't in "
+                       "the list (Claude picks again from the videos)."},
+            "theme": {"type": "string", "description": "With repick: what the new moments should be about."},
+        },
+        "required": ["understood"],
+    },
+}
+
+ASK_SYSTEM = """You are ClipAgent's edit maker. The person made a short music edit (for TikTok, Reels and Shorts) \
+and tells you in their own words what to change. Turn that into changes using only the change_edit tool's \
+controls, then tell them in plain words what you'll do.
+
+Rules:
+- Change only what they asked for. Leave everything else as it is.
+- "Faster" / "more cuts" → pace faster; "slower" / "calmer" → pace slower (or the next pace step from where it is).
+- "More flashes" → flashes many; "fewer flashes" → few; "no flashes" → effects.flash false.
+- "Black and white" → grade mono; "warmer"/"gold" → gold; "film look" → film; "natural" / "no filter" → none.
+- "Put the line about X on the drop" → find the moment whose words say it and send ALL moments with drop on that \
+one. If none of the moments says it, set repick with a theme naming it.
+- "Different song" → song, by the exact name of one of their songs; if they name none, pick a different one.
+- Words on screen: only what he says (numbers too) — never invent.
+- Things the controls can't do (download a song, add stickers, sound effects, other people's footage, post it for \
+them) go in cant, with the closest thing you can do. Never pretend.
+- Campaign rules, when given, override everything: never switch on something the brief forbids — say so in cant.
+"""
+
+
+def _ask_prompt(edit: Dict[str, Any]) -> str:
+    s = edit["settings"]
+    plan = edit.get("plan") or {}
+    tl = plan.get("timeline") or {}
+    fx = tl.get("effects") or {}
+    sounds = store.list_sounds()
+    current = store.get_sound(s.get("sound") or "") if s.get("sound") else None
+    words = words_for_sources([m["source"] for m in plan.get("moments") or []])
+    titles = {j: (store.get_job(j) or {}).get("title") or "" for j in s["sources"]}
+    lines = [f"Style: {s['style']} ({STYLES[s['style']]['what']})",
+             f"Song: {current['name'] if current else 'none'} · their songs: " +
+             (", ".join(f"“{x['name']}” ({(x.get('analysis') or {}).get('bpm', '?')} BPM)" for x in sounds) or "none"),
+             f"Length: {s['length']} s · pace: {s.get('pace', 'normal')} · flashes: {s.get('flashes', 'normal')} · "
+             f"grade: {tl.get('grade') or s.get('grade') or STYLES[s['style']]['grade']}",
+             "Effects on: " + (", ".join(k for k, v in fx.items() if v) or "none"),
+             f"Voice level {tl.get('voice', 0)} · music level {(tl.get('music') or {}).get('level', 0)}",
+             f"Hook: {plan.get('hook') or '(none)'}",
+             "Moments, in playing order:"]
+    for m in plan.get("moments") or []:
+        said = _said_between(words.get(m["source"]) or [], m["start"], m["end"])[:260]
+        lines.append(f"  {m['id']}{' [DROP]' if m.get('drop') else ''}{' [off]' if m.get('off') else ''} — "
+                     f"{titles.get(m['source'], '')[:40]} {m['start']:.1f}-{m['end']:.1f}s · on screen: "
+                     f"“{m.get('text') or ''}” · he says: “{said}”")
+    return "\n".join(lines)
+
+
+def ask(eid: str, text: str) -> Dict[str, Any]:
+    """A typed change request → Claude maps it to the edit's controls → re-made (Undo keeps the old one)."""
+    from . import campaign
+    edit = store.get_edit(eid)
+    if not edit:
+        raise ValueError("Edit not found")
+    if edit["status"] in ("queued", "running"):
+        raise ValueError("This edit is still being made — wait until it's done, then ask")
+    if not (edit.get("plan") or {}).get("moments"):
+        raise ValueError("This edit has no moments yet — press Re-make first")
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("Type what you'd like changed")
+    rules = _rules(edit["settings"])
+    system = ASK_SYSTEM + (f"\n\nCAMPAIGN RULES:\n{campaign.picker_guidance(rules)}" if rules else "")
+    client = highlights._client()
+    message = client.messages.create(model=CLAUDE_MODEL, max_tokens=3000, system=system, tools=[ASK_TOOL],
+                                     tool_choice={"type": "tool", "name": "change_edit"},
+                                     messages=[{"role": "user", "content": _ask_prompt(edit)
+                                                + f"\n\nTHEIR REQUEST:\n{text}"}])
+    got = toolio.tool_inputs(message)
+    if not got:
+        raise RuntimeError("Claude's answer couldn't be read — try saying it another way")
+    r = got[0]
+    cant = toolio.coerce(r.get("cant"))
+    reply = {"understood": highlights._text(r.get("understood"))[:600],
+             "question": highlights._text(r.get("question"))[:300],
+             "cant": [str(c).strip()[:300] for c in (cant if isinstance(cant, list) else [cant] if cant else [])
+                      if str(c).strip()][:6], "changed": False}
+    changes: Dict[str, Any] = {}
+    if not reply["question"]:
+        if r.get("style"):
+            changes["style"] = style_key(r["style"])
+        if r.get("song"):
+            name = str(r["song"]).strip().strip("“”\"").lower()
+            if name in ("none", "no music", "no song"):
+                changes["sound"] = ""
+            else:
+                match = next((x for x in store.list_sounds() if x["name"].lower() == name), None) or \
+                    next((x for x in store.list_sounds() if name and name in x["name"].lower()), None)
+                if match:
+                    changes["sound"] = match["id"]
+                else:
+                    reply["cant"].append(f"There's no song called “{r['song']}” in your songs — add it first.")
+        if r.get("length") in LENGTHS:
+            changes["length"] = int(r["length"])
+        for key, allowed in (("pace", PACES), ("flashes", FLASHES), ("grade", GRADES)):
+            if r.get(key) in allowed:
+                changes[key] = r[key]
+        fx = toolio.as_dict(r.get("effects"))
+        if fx:
+            changes["effects"] = {k: bool(v) for k, v in fx.items() if k in EFFECTS}
+        for key in ("voice", "music"):
+            if r.get(key) is not None:
+                changes[key] = highlights._num(r.get(key), 1.0)
+        if highlights._text(r.get("hook")):
+            hook = highlights._text(r["hook"])
+            heard = " ".join(" ".join(w.get("w", "") for w in ws)
+                             for ws in words_for_sources(edit["settings"]["sources"]).values())
+            if _numbers_said(hook, heard):
+                changes["hook"] = hook
+            else:
+                reply["cant"].append("That hook has a number he never says, so it stays as it is.")
+        if highlights._text(r.get("caption")):
+            changes["caption"] = highlights._text(r["caption"])
+        moments = toolio.coerce(r.get("moments"))
+        if isinstance(moments, list) and moments:
+            changes["moments"] = [toolio.as_dict(m) for m in moments if toolio.as_dict(m).get("id")]
+        if r.get("repick") is True:
+            changes["repick"] = True
+            if highlights._text(r.get("theme")):
+                changes["theme"] = highlights._text(r["theme"])
+    entry = {"text": text[:300], **reply, "changed": bool(changes), "at": time.time()}
+    if changes:
+        remake(eid, {**changes, "_ask": entry})        # saved with the plan before the re-make starts
+        reply["changed"] = True
+    else:
+        plan = dict(edit.get("plan") or {})
+        plan["asks"] = (plan.get("asks") or [])[-9:] + [entry]
+        store.update_edit(eid, plan=plan)
+    return reply
 
 
 def edit_json(e: Dict[str, Any]) -> Dict[str, Any]:
@@ -1278,19 +1744,33 @@ def edit_json(e: Dict[str, Any]) -> Dict[str, Any]:
     s = e.get("settings") or {}
     style = style_key(s.get("style"))
     st = STYLES[style]
+    sound = store.get_sound(s.get("sound") or "") if s.get("sound") else None
+    titles = {j: (store.get_job(j) or {}).get("title") or "" for j in s.get("sources") or []}
+    moments = [{**{k: v for k, v in m.items() if k != "motion"}, "source_title": titles.get(m["source"], ""),
+                "length": round(m["end"] - m["start"], 1),
+                "thumb": f"/media/edit-moment/{e['id']}/{m['id']}.jpg"} for m in plan.get("moments") or []]
+    post = plan.get("post") or {}
     return {
         "id": e["id"], "title": e.get("title") or "", "status": e.get("status"), "stage": e.get("stage"),
         "progress": e.get("progress") or 0, "error": e.get("error") or "", "created_at": e.get("created_at"),
-        "style": style, "style_name": st["name"], "settings": s, "hook": plan.get("hook") or "",
-        "length": tl.get("length"), "moments": plan.get("moments") or [], "drop_at": tl.get("drop_at"),
-        "segments": len(tl.get("segments") or []), "cuts": tl.get("cuts") or [],
+        "style": style, "style_name": st["name"], "pace_kind": st["pace"], "settings": s,
+        "hook": plan.get("hook") or "", "length": tl.get("length"), "moments": moments,
+        "drop_at": tl.get("drop_at"), "segments": len(tl.get("segments") or []), "cuts": tl.get("cuts") or [],
         "effects": tl.get("effects") or {**st["effects"], **(s.get("effects") or {})},
-        "grade": tl.get("grade") or s.get("grade") or st["grade"],
+        "grade": tl.get("grade") or s.get("grade") or st["grade"], "pace": s.get("pace", "normal"),
+        "flashes": s.get("flashes", "normal"),
         "voice": tl.get("voice", s.get("voice", st["voice"])),
         "music": (tl.get("music") or {}).get("level", s.get("music", st["music"])),
+        "sound": sound_json(sound) if sound else None,
         "notes": (plan.get("pick_notes") or []) + (tl.get("notes") or []),
-        "caption": e.get("caption") or "", "hashtags": e.get("hashtags") or [],
-        "video_url": f"/media/edit/{e['id']}.mp4?v={int(e.get('updated_at') or 0)}" if e.get("file") else None,
-        "thumb_url": f"/media/edit/{e['id']}.jpg?v={int(e.get('updated_at') or 0)}" if e.get("thumb") else None,
+        "caption": post.get("caption") or e.get("caption") or "", "hashtags": post.get("hashtags") or e.get("hashtags") or [],
+        "post_text": post.get("text") or "", "checklist": post.get("checklist") or [],
+        "compliance": e.get("compliance") or None, "can_undo": bool(e.get("undo")),
+        "asks": [{k: a.get(k) for k in ("text", "understood", "question", "cant", "changed", "at")}
+                 for a in (plan.get("asks") or [])[-5:]],
+        "video_url": f"/media/edit/{e['id']}.mp4?v={int(e.get('updated_at') or 0)}"
+        if e.get("file") and Path(e["file"]).is_file() else None,
+        "thumb_url": f"/media/edit/{e['id']}.jpg?v={int(e.get('updated_at') or 0)}"
+        if e.get("thumb") and Path(e["thumb"]).is_file() else None,
         "campaign_id": e.get("campaign_id") or "",
     }

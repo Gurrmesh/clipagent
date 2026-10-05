@@ -320,3 +320,64 @@ def check_source(rb: Dict[str, Any], clip: Dict[str, Any], edits: Dict[str, Any]
     result = summarize(checks)
     result["measured"] = {"duration": round(seconds, 3)}
     return result
+
+
+def check_edit(rb: Dict[str, Any], timeline: Dict[str, Any], output: Path, post: Dict[str, Any],
+               hook: str, tone: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    """A music edit (several moments, cut to a song): measured on what was rendered —
+    the length, the song, every effect the brief forbids — plus the caption and the tone."""
+    r = campaign.resolve(rb)
+    a = r["allowed"]
+    fx = timeline.get("effects") or {}
+    segs = timeline.get("segments") or []
+    checks: List[Dict[str, str]] = []
+    try:
+        seconds = overlay.inspect(output)["duration"]
+    except Exception:
+        seconds = float(timeline.get("length") or 0)
+    checks.append(_length(r, seconds))
+    moments = len({s["moment"] for s in segs})
+    if not a["stitch"]:
+        checks.append(_item("stitch", "One unbroken moment", "fail" if moments > 1 else "pass",
+                            f"Joins {moments} moments — the brief doesn't allow that." if moments > 1 else
+                            "A single moment."))
+    if not a["crop"]:
+        checks.append(_item("crop", "Whole frame, no crop", "fail", "An edit crops the picture to vertical."))
+    music = timeline.get("music") or {}
+    if music and float(music.get("level") or 0) > 0:
+        checks.append(_item("music", "Added music", "pass" if a["music"] else "fail",
+                            "The brief allows music." if a["music"] else "A song is added — the brief doesn't allow music."))
+    retimed = any(abs(float(v) - 1.0) > 0.01 for s in segs for _, v in (s.get("curve") or []))
+    if not a["speed"]:
+        checks.append(_item("speed", "No speed changes", "fail" if retimed else "pass",
+                            "Slow-mo or speed ramps are on." if retimed else "Plays at normal speed."))
+    moved = any(s.get("pulses") or s.get("shakes") or abs(float(s.get("zoom") or 1) - 1) > 0.01 for s in segs) \
+        or bool(fx.get("push"))
+    if not a["zoom"]:
+        checks.append(_item("zoom", "No zooms or camera moves", "fail" if moved else "pass",
+                            "Zoom punches, shakes or push-ins are on." if moved else "Camera stays still."))
+    words_on = bool(hook.strip()) or any(s.get("text") for s in segs) or \
+        (timeline.get("text") in ("subtitle", "build") and any(s.get("words") for s in segs) and fx.get("text"))
+    if not a["hook"] and words_on:
+        checks.append(_item("hook", "Text on screen", "fail", "The brief doesn't allow on-screen text."))
+    captions = timeline.get("text") in ("subtitle", "build") and bool(fx.get("text"))
+    if r["captions_required"]:
+        checks.append(_item("captions", "Captions burned in", "pass" if captions else "fail",
+                            "His words are on screen." if captions else
+                            "The brief requires captions — Cinematic and Motivation edits show his words."))
+    elif captions and not a["captions"]:
+        checks.append(_item("captions", "No captions", "fail", "The brief doesn't allow burned-in captions."))
+    if fx.get("letterbox") and not a["borders"]:
+        checks.append(_item("borders", "No bars", "fail", "Cinema bars are on — the brief doesn't allow bars."))
+    if not a["audio"] and float(timeline.get("voice") or 0) > 0:
+        checks.append(_item("audio", "Audio levels untouched", "fail", "An edit mixes and levels his voice."))
+    logo = _brand_logo(r, None, None)
+    if logo:
+        if r.get("brand_logo") == "required":
+            logo["detail"] = "The brief requires the brand's logo on screen — edits can't add it yet. Make clips instead."
+        checks.append(logo)
+    checks += _caption(r, post)
+    checks.append(_tone(tone, hook))
+    result = summarize(checks)
+    result["measured"] = {"duration": round(seconds, 3)}
+    return result

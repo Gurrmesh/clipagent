@@ -122,6 +122,8 @@ MIGRATIONS = {
         "undo": "TEXT",
     },
     "jobs": {"source_hash": "TEXT", "framing": "TEXT", "batch_id": "TEXT", "campaign_id": "TEXT"},
+    # the edit maker: the campaign gate's verdict, and the version before the last change (for Undo)
+    "edits": {"compliance": "TEXT", "undo": "TEXT"},
 }
 
 
@@ -419,7 +421,7 @@ def create_edit(title: str, settings: Dict[str, Any], campaign_id: str = "") -> 
 
 
 def update_edit(edit_id: str, **fields) -> None:
-    for f in ("settings", "plan"):
+    for f in ("settings", "plan", "compliance", "undo"):
         if f in fields and not isinstance(fields[f], str):
             fields[f] = json.dumps(fields[f])
     if "hashtags" in fields and not isinstance(fields["hashtags"], str):
@@ -434,7 +436,8 @@ def update_edit(edit_id: str, **fields) -> None:
 
 def get_edit(edit_id: str) -> Optional[Dict[str, Any]]:
     with connect() as conn:
-        d = _row(conn.execute("SELECT * FROM edits WHERE id=?", (edit_id,)).fetchone(), ("settings", "plan"))
+        d = _row(conn.execute("SELECT * FROM edits WHERE id=?", (edit_id,)).fetchone(),
+                 ("settings", "plan", "compliance", "undo"))
     if d:
         try:
             d["hashtags"] = json.loads(d.get("hashtags") or "[]")

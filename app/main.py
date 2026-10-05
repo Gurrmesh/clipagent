@@ -20,8 +20,8 @@ from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, U
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import (brandlogo, campaign, captions, doctor, instruct, media, money, notify, overlay, pipeline, render,
-               store, styles, transcribe)
+from . import (brandlogo, campaign, captions, doctor, edits, instruct, media, money, notify, overlay, pipeline,
+               render, store, styles, transcribe)
 from .config import (ANTHROPIC_API_KEY, BASE_DIR, CLIP_DIR, MAX_CLIPS, THUMB_DIR,
                      WHISPER_API_KEY, WORK_DIR)
 
@@ -873,6 +873,193 @@ def thumb_file(name: str) -> FileResponse:
     return FileResponse(path, media_type="image/jpeg")
 
 
+# --- edits (the edit maker: music edits cut from your videos) ---------------------------
+
+RIGHTS_NOTE = ("Use songs you're allowed to use. On TikTok and Reels you can also add the trending sound in the app "
+               "after posting.")
+
+
+def _edit_out(e: Dict[str, Any]) -> Dict[str, Any]:
+    out = edits.edit_json(e)
+    out["error"] = friendly_error(out["error"]) if out["error"] else ""
+    return out
+
+
+def _edit_or_404(edit_id: str) -> Dict[str, Any]:
+    e = store.get_edit(edit_id)
+    if not e:
+        raise HTTPException(404, "That edit isn't here any more")
+    return e
+
+
+@app.get("/api/sounds")
+def sounds() -> Dict[str, Any]:
+    return {"sounds": [edits.sound_json(s) for s in store.list_sounds()], "note": RIGHTS_NOTE}
+
+
+@app.post("/api/sounds")
+def add_sound(file: UploadFile = File(...), name: str = Form("")) -> Dict[str, Any]:
+    tmp = _save_upload(file)
+    label = (name.strip() or Path(file.filename or "Song").stem)[:80]
+    try:
+        sound = edits.add_sound(tmp, label + Path(file.filename or "").suffix.lower())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        tmp.unlink(missing_ok=True)
+    return {"sound": edits.sound_json(sound)}
+
+
+@app.delete("/api/sounds/{sound_id}")
+def remove_sound(sound_id: str) -> Dict[str, Any]:
+    try:
+        edits.delete_sound(sound_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True}
+
+
+@app.get("/media/sound/{sound_id}")
+def sound_file(sound_id: str) -> FileResponse:
+    sound = store.get_sound(Path(sound_id).stem)
+    if not sound or not Path(sound.get("file") or "").is_file():
+        raise HTTPException(404, "Song not found")
+    kind = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac", ".wav": "audio/wav",
+            ".ogg": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac"}.get(Path(sound["file"]).suffix.lower(),
+                                                                                   "application/octet-stream")
+    return FileResponse(sound["file"], media_type=kind)
+
+
+@app.get("/api/edit-sources")
+def edit_sources() -> Dict[str, Any]:
+    return {"sources": edits.usable_sources()}
+
+
+@app.get("/api/edit-styles")
+def edit_styles() -> Dict[str, Any]:
+    return {
+        "styles": [{"id": k, "name": v["name"], "what": v["what"], "pace": v["pace"], "length": v["length"],
+                    "needs_music": bool(v.get("needs_music")), "music_optional": bool(v.get("music_optional")),
+                    "effects": v["effects"], "grade": v["grade"], "voice": v["voice"], "music": v["music"]}
+                   for k, v in edits.STYLES.items()],
+        "effects": edits.EFFECTS, "grades": edits.GRADES, "lengths": list(edits.LENGTHS),
+        "paces": list(edits.PACES), "flashes": edits.FLASHES, "rights": RIGHTS_NOTE,
+    }
+
+
+@app.post("/api/edits")
+def create_edit(body: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return {"id": edits.create(body or {})}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/edits")
+def list_edits(limit: int = 60) -> Dict[str, Any]:
+    out = []
+    for e in store.list_edits(limit):
+        j = _edit_out(e)
+        out.append({k: j[k] for k in ("id", "title", "status", "stage", "progress", "error", "style", "style_name",
+                                      "length", "thumb_url", "video_url", "created_at", "campaign_id")}
+                   | {"verdict": (j["compliance"] or {}).get("status")})
+    return {"edits": out}
+
+
+@app.get("/api/edits/{edit_id}")
+def edit_detail(edit_id: str) -> Dict[str, Any]:
+    return _edit_out(_edit_or_404(edit_id))
+
+
+@app.delete("/api/edits/{edit_id}")
+def remove_edit(edit_id: str) -> Dict[str, Any]:
+    _edit_or_404(edit_id)
+    try:
+        edits.delete(edit_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True}
+
+
+@app.post("/api/edits/{edit_id}/remake")
+def remake_edit(edit_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    _edit_or_404(edit_id)
+    try:
+        edits.remake(edit_id, body or {})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return _edit_out(store.get_edit(edit_id))
+
+
+@app.post("/api/edits/{edit_id}/ask")
+def ask_edit(edit_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    _edit_or_404(edit_id)
+    try:
+        reply = edits.ask(edit_id, str((body or {}).get("text") or ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:                         # Claude down, key refused…
+        traceback.print_exc()
+        raise HTTPException(502, friendly_error(str(exc)))
+    return {"reply": reply, "edit": _edit_out(store.get_edit(edit_id))}
+
+
+@app.post("/api/edits/{edit_id}/undo")
+def undo_edit(edit_id: str) -> Dict[str, Any]:
+    _edit_or_404(edit_id)
+    try:
+        return _edit_out(edits.undo(edit_id))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/edits/{edit_id}/versions")
+def edit_versions(edit_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    _edit_or_404(edit_id)
+    try:
+        return {"ids": edits.versions(edit_id, [str(x) for x in (body or {}).get("sounds") or []])}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/edits/{edit_id}/post")
+def edit_post_text(edit_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    _edit_or_404(edit_id)
+    try:
+        edits.set_post(edit_id, str((body or {}).get("caption") or ""),
+                       [str(t) for t in (body or {}).get("hashtags") or []])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return _edit_out(store.get_edit(edit_id))
+
+
+@app.get("/media/edit/{name}")
+def edit_file(name: str) -> FileResponse:
+    path = edits.EDIT_DIR / Path(name).name
+    if not path.is_file() or path.suffix not in (".mp4", ".jpg"):
+        raise HTTPException(404, "Not made yet")
+    return FileResponse(path, media_type="video/mp4" if path.suffix == ".mp4" else "image/jpeg")
+
+
+@app.get("/media/edit-moment/{edit_id}/{name}")
+def edit_moment_thumb(edit_id: str, name: str) -> FileResponse:
+    path = edits.moment_thumb(edit_id, Path(name).stem)
+    if not path:
+        raise HTTPException(404, "No picture for that moment")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.get("/api/edits/{edit_id}/download")
+def download_edit(edit_id: str, anyway: bool = False) -> FileResponse:
+    e = _edit_or_404(edit_id)
+    if not e.get("file") or not Path(e["file"]).is_file():
+        raise HTTPException(404, "This edit isn't made yet")
+    verdict = e.get("compliance") or {}
+    if verdict.get("status") == "blocked" and not anyway:
+        raise HTTPException(409, f"The campaign check blocked this edit. {verdict.get('summary', '')}")
+    return FileResponse(e["file"], media_type="video/mp4", filename=f"{media.safe_name(e['title'] or 'edit')}.mp4")
+
+
 # --- money: posts, earnings, planner, watched channels ---------------------------------
 
 def _post_json(p: Dict[str, Any]) -> Dict[str, Any]:
@@ -985,6 +1172,8 @@ TG_HELP = ("<b>What I can do</b>\n"
            "/clips — send the last video's clips again\n"
            "/change 2 end it right after the punchline — change the last video's clips in your own words "
            "(<code>/change all bigger captions</code>)\n"
+           "/edit velocity his biggest wins — a music edit of the last video, with your last song "
+           "(styles: velocity, aura, flow, cinematic, motivation, funny, money)\n"
            "/retry — try the last failed video again")
 
 
@@ -1127,7 +1316,12 @@ def telegram_command(text: str) -> Optional[str]:
         return None
     if low.startswith("/retry"):
         return _tg_retry()
-    if low.startswith("/change") or low.startswith("/edit"):
+    if low.startswith("/edit"):
+        word = (low.split() + ["", ""])[1]
+        if not word or edits.ALIASES.get(word, word) in edits.STYLES:
+            return _tg_edit(text)
+        return _tg_change(text)                  # "/edit 2 end it sooner" still changes clip 2
+    if low.startswith("/change"):
         return _tg_change(text)
     if low.startswith("/plan"):
         return _tg_plan()
@@ -1182,6 +1376,43 @@ def _tg_change(text: str) -> str:
 
     threading.Thread(target=work, daemon=True).start()
     return f"👀 Reading that for <b>{notify.esc((last['title'] or '')[:70])}</b>…"
+
+
+def _tg_edit(text: str) -> str:
+    """/edit velocity his best wins — an edit of the last finished video, with the last song used."""
+    parts = text.strip().split(None, 2)
+    if len(parts) < 2:
+        return ("Make a music edit of the last video: <code>/edit velocity his biggest wins</code>\n"
+                "Styles: " + ", ".join(k for k in edits.STYLES) + ". It uses the last song you used.")
+    style = edits.style_key(parts[1])
+    theme = parts[2] if len(parts) > 2 else ""
+    sources = edits.usable_sources()
+    if not sources:
+        return "No finished video to cut an edit from yet — send me a link first."
+    src = sources[0]
+    used = next((e["settings"].get("sound") for e in store.list_edits(50) if (e.get("settings") or {}).get("sound")
+                 and store.get_sound(e["settings"]["sound"])), "")
+    sound_id = used or next((s["id"] for s in store.list_sounds()), "")
+    st = edits.STYLES[style]
+    if st.get("needs_music") and not sound_id:
+        return (f"{st['name']} edits are cut to a song — add one on ClipAgent's Edits page first, "
+                "or try <code>/edit cinematic</code> (no song needed).")
+    settings = {"style": style, "sources": [src["id"]], "sound": sound_id, "theme": theme,
+                "campaign_id": src.get("campaign_id") or ""}
+    try:
+        edits.create(settings)
+    except ValueError as exc:
+        if sound_id and not st.get("needs_music") and "music" in str(exc):
+            try:
+                edits.create({**settings, "sound": ""})
+                return (f"🎬 Making a {st['name']} edit of <b>{notify.esc(src['title'][:70])}</b> with no music "
+                        "(the campaign doesn't allow added music). I'll send it here.")
+            except ValueError as again:
+                return f"⚠️ {notify.esc(str(again))}"
+        return f"⚠️ {notify.esc(str(exc))}"
+    song = store.get_sound(sound_id) if sound_id else None
+    return (f"🎬 Making a {st['name']} edit of <b>{notify.esc(src['title'][:70])}</b>"
+            + (f" to “{notify.esc(song['name'])}”" if song else "") + ". I'll send it here when it's ready.")
 
 
 def _when(ts: Optional[float]) -> str:
@@ -1304,6 +1535,7 @@ def _settle_interrupted_jobs() -> None:
 @app.on_event("startup")
 def _start_telegram() -> None:
     _settle_interrupted_jobs()
+    edits.settle_interrupted()
     money.start()
     if notify.start(telegram_command):
         print("Telegram updates are on" + ("" if notify.connected() else
