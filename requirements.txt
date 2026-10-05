@@ -1,0 +1,17 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+python-dotenv==1.0.1
+yt-dlp>=2025.1.15
+openai==1.59.6
+anthropic==0.42.0
+# Face detection for auto-framing. Headless has no GUI dependencies, so it
+# installs cleanly on a server as well as a laptop.
+#
+# Pinned below 5.0 on purpose: OpenCV 5 dropped CascadeClassifier and stopped
+# shipping the Haar cascade files, which would leave auto-framing silently off.
+# To move to 5.x, put the YuNet model in models/ first (see models/README.md).
+opencv-python-headless>=4.9.0,<5.0.0
+
+# Cards (headline label, title bar, comment bubble) and colour emoji
+pillow>=10.0
