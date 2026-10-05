@@ -24,7 +24,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import beats, highlights, store, toolio, transcribe
+from . import beats, highlights, motionmatch, store, toolio, transcribe
 from .config import CLAUDE_MODEL, DATA_DIR
 
 SOUND_DIR = DATA_DIR / "sounds"
@@ -738,15 +738,11 @@ def _seg(m: Dict[str, Any], at: float, dur: float, curve: List[List[float]], **k
     return seg
 
 
-def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, analysis: Dict[str, Any],
-                   fx: Dict[str, bool], durations: Dict[str, float], notes: List[str]) -> Dict[str, Any]:
+def _beat_cuts(style: str, length: float, analysis: Dict[str, Any], notes: List[str]) -> Dict[str, Any]:
+    """Where a beat edit cuts on this song: the song section, the drop, and every slot (in beats)."""
     st = STYLES[style]
     g = beat_grid(analysis)
     grid, period, song_len = g["t"], g["period"], g["duration"]
-
-    def is_bar(i: int) -> bool:
-        return (i - g["phase"]) % 4 == 0
-
     first_real = next(i for i, t in enumerate(grid) if t >= -0.01)
     drop_i = _nearest(grid, float(analysis.get("drop") or grid[first_real]))
     start_i = max(first_real, drop_i - st["pre_beats"])
@@ -761,14 +757,11 @@ def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, ana
         raise ValueError("This song is too short for an edit — pick a song of at least 10 seconds")
     if want < asked:
         notes.append(f"The song only allows {want * period:.0f} s here, so the edit is that long.")
-    s0 = grid[start_i]
     kd = drop_i - start_i
     if not 0 <= kd < want - 2:
         kd = min(want - 4, 8)
         notes.append("This song has no clear drop in the part used, so the strongest moment lands on bar 3.")
     build, hold, after = _patterns(style, period)
-
-    # the cuts, in beats from the start of the edit
     cuts, k, i = [0], 0, 0
     while k < kd:
         k = min(kd, k + build[i % len(build)])
@@ -785,7 +778,29 @@ def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, ana
     if len(cuts) > 3 and cuts[-1] - cuts[-2] < 2 and cuts[-2] != kd and cuts[-2] - cuts[-3] < 4:
         cuts.pop(-2)                                         # the last shot gets at least two beats
     slots = list(zip(cuts[:-1], cuts[1:]))
-    ds = next(j for j, (a, _) in enumerate(slots) if a == kd)
+    return {"grid": grid, "period": period, "phase": g["phase"], "start_i": start_i, "want": want, "kd": kd,
+            "s0": grid[start_i], "slots": slots, "ds": next(j for j, (a, _) in enumerate(slots) if a == kd)}
+
+
+def slots_for(style: str, sound: Optional[Dict[str, Any]], length: float) -> Optional[Tuple[int, int]]:
+    """For a beat edit: (shots before the drop, shots in all)."""
+    analysis = (sound or {}).get("analysis") or {}
+    if STYLES[style_key(style)]["pace"] != "beat" or len(analysis.get("beats") or []) < 4:
+        return None
+    c = _beat_cuts(style_key(style), length, analysis, [])
+    return c["ds"], len(c["slots"])
+
+
+def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, analysis: Dict[str, Any],
+                   fx: Dict[str, bool], durations: Dict[str, float], notes: List[str]) -> Dict[str, Any]:
+    st = STYLES[style]
+    c = _beat_cuts(style, length, analysis, notes)
+    grid, period, start_i, want, kd, s0 = c["grid"], c["period"], c["start_i"], c["want"], c["kd"], c["s0"]
+    slots, ds = c["slots"], c["ds"]
+    drop_i = start_i + kd
+
+    def is_bar(i: int) -> bool:
+        return (i - c["phase"]) % 4 == 0
 
     drop_m = next((m for m in ordered if m.get("drop")), ordered[len(ordered) // 2])
     di = ordered.index(drop_m)
@@ -1016,9 +1031,14 @@ def build_timeline(moments: List[Dict[str, Any]], style: str, length: float,
         built = _speech_timeline(ordered, style, float(length), analysis if analysis and analysis.get("beats")
                                  else None, fx, durations, notes)
     segments = built["segments"]
-    for seg in segments:
+    motion = {m["id"]: m.get("motion") for m in ordered}
+    for i, seg in enumerate(segments):
         seg["words"] = _words_for(seg, words_by_source.get(seg["source"]) or [])
         seg.pop("dip", None)
+        if seg.get("blur_in") and i > 0:                      # the cut's streak follows the motion through it
+            vec = motionmatch.blur_vector(motion.get(segments[i - 1]["moment"]), motion.get(seg["moment"]))
+            if vec:
+                seg["blur_vec"] = vec
     total = round(built["length"], 4)
     vl = st["voice"] if voice_level is None else max(0.0, min(1.5, float(voice_level)))
     ml = st["music"] if music_level is None else max(0.0, min(1.5, float(music_level)))
@@ -1131,6 +1151,9 @@ def plan_edit(eid: str, repick: bool) -> Dict[str, Any]:
             tags = must + [t for t in tags if t.lower() not in {x.lower() for x in must}]
         plan.update({"moments": picked["moments"], "title": picked["title"], "hook": picked["hook"],
                      "pick_notes": picked["notes"]})
+        if s["style"] == "flow":
+            plan["moments"], more = match_motion(eid, plan["moments"], sources, sound, s["length"])
+            plan["pick_notes"] = plan["pick_notes"] + more
         store.update_edit(eid, title=picked["title"] or edit["title"], caption=picked["caption"],
                           hashtags=tags[:10])
     _stage(eid, "Fitting it to the beat", 22)
@@ -1141,6 +1164,18 @@ def plan_edit(eid: str, repick: bool) -> Dict[str, Any]:
     plan["timeline"] = timeline
     store.update_edit(eid, plan=plan)
     return plan
+
+
+def match_motion(eid: str, moments: List[Dict[str, Any]], sources: List[Dict[str, Any]],
+                 sound: Optional[Dict[str, Any]], length: float) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Flow: measure how every shot moves and chain them so each cut carries the motion on."""
+    _stage(eid, "Matching the movement between shots", 14)
+    fit = slots_for("flow", sound, length)
+    paths = {x["id"]: Path(x["source_path"]) for x in sources}
+    durs = {x["id"]: float(x.get("duration") or 0) or 1e9 for x in sources}
+    return motionmatch.order(moments, paths, durs, keep=fit[1] if fit else None, drop_at=fit[0] if fit else None,
+                             progress=lambda p: _stage(eid, f"Matching the movement between shots — {p}%",
+                                                       14 + int(p * 0.07)))
 
 
 def run(eid: str, repick: bool = True) -> None:

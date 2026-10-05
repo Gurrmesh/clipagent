@@ -883,9 +883,10 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
                             sx, sy, rot = shake_at(s, t, style)
                             if sx or sy:
                                 z *= 1.0 + 2.2 * (abs(sx) + abs(sy)) / OW      # never show past the picture's edge
-                            if s.get("blur_in") and t < 3 / FPS:
-                                strength = 1.0 - t * FPS / 3
-                                vec = s.get("blur_vec") or None
+                            vec = s.get("blur_vec") or None
+                            frames_blur = 3 if vec else 2           # a streak along the motion, or a light zoom blur
+                            if s.get("blur_in") and t < frames_blur / FPS:
+                                strength = 1.0 - t * FPS / frames_blur
                                 mats = []
                                 for j in range(5):
                                     v = (j / 4 - 0.5) * strength
@@ -893,7 +894,7 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
                                         M = affine(win, src.h, cx, cy, z, rot, sx + vec[0] * v * 1.6,
                                                    sy + vec[1] * v * 1.6)
                                     else:
-                                        M = affine(win, src.h, cx, cy, z * (1 + 0.07 * (v + 0.5)), rot, sx, sy)
+                                        M = affine(win, src.h, cx, cy, z * (1 + 0.045 * (v + 0.5)), rot, sx, sy)
                                     mats.append(M)
                                 acc = np.zeros((OH // 2, OW // 2, 3), np.float32)
                                 for M in mats:
