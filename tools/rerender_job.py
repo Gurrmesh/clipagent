@@ -3,6 +3,12 @@
 usage: python tools/rerender_job.py <job_id>
 Keeps each clip's moment, hook and settings; only the rendering changes.
 """
+import sys as _sys
+for _stream in (_sys.stdout, _sys.stderr):  # Windows: print safely even when output goes to a file
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import json
 import sys
 import time

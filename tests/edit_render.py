@@ -10,6 +10,12 @@ Then pull frames and look at them (the paths are printed).
 """
 from __future__ import annotations
 
+import sys as _sys
+for _stream in (_sys.stdout, _sys.stderr):  # Windows: print safely even when output goes to a file
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import json
 import os
 import re
@@ -43,7 +49,7 @@ def ff(*args):
 
 def frame(path, n):
     """Output frame n of a video, as BGR."""
-    proc = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"select=eq(n\\,{n})", "-vsync", "0",
+    proc = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"select=eq(n\\,{n})", "-fps_mode", "passthrough",
                            "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], capture_output=True)
     return np.frombuffer(proc.stdout, np.uint8).reshape(1920, 1080, 3)
 

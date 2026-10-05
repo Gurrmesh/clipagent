@@ -1,4 +1,10 @@
 """Render the synthetic flash/beep source through the seamless engine and report A/V offsets."""
+import sys as _sys
+for _stream in (_sys.stdout, _sys.stderr):  # Windows: print safely even when output goes to a file
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

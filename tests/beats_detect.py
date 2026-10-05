@@ -5,6 +5,12 @@ Makes three songs with tools/make_test_song.py (128, 92 and 150 BPM, each with
 a quiet intro and a loud drop) and checks the tempo, that every tracked beat
 sits on a real beat, and that the drop is found on the right beat.
 """
+import sys as _sys
+for _stream in (_sys.stdout, _sys.stderr):  # Windows: print safely even when output goes to a file
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import subprocess
 import sys
 import tempfile

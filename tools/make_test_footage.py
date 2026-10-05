@@ -9,6 +9,12 @@ small clock in the corner shows the source time of every frame. --warm and
 --cold give the whole picture a camera colour cast, so colour matching between
 two videos can be checked.
 """
+import sys as _sys
+for _stream in (_sys.stdout, _sys.stderr):  # Windows: print safely even when output goes to a file
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import math
 import subprocess
 import sys

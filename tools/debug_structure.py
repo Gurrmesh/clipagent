@@ -5,6 +5,12 @@ Prints, per clip, what Claude proposed and what validation made of it.
 """
 from __future__ import annotations
 
+import sys as _sys
+for _stream in (_sys.stdout, _sys.stderr):  # Windows: print safely even when output goes to a file
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import json
 import sys
 from pathlib import Path

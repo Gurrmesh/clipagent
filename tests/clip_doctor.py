@@ -2,6 +2,12 @@
 
 usage: python tests/clip_doctor.py <a rendered 1080x1920 clip.mp4>
 """
+import sys as _sys
+for _stream in (_sys.stdout, _sys.stderr):  # Windows: print safely even when output goes to a file
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import json
 import os
 import shutil

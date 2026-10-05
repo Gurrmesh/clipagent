@@ -4,6 +4,12 @@ usage: python tests/parallel_render.py <source.mp4> [clip_seconds] [clips]
 Renders the same clips twice — in-process threads (the old way) and worker
 processes (the new way) — and compares the time and the files.
 """
+import sys as _sys
+for _stream in (_sys.stdout, _sys.stderr):  # Windows: print safely even when output goes to a file
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import os
 import sys
 import tempfile

@@ -6,6 +6,12 @@ For each Short: download it, transcribe it, find where each stretch of its
 speech comes from in the source transcript, detect its cuts, and save a
 contact sheet. Writes <out_dir>/report.json.
 """
+import sys as _sys
+for _stream in (_sys.stdout, _sys.stderr):  # Windows: print safely even when output goes to a file
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import json
 import re
 import subprocess

@@ -4,6 +4,12 @@ usage: python tools/make_test_song.py BPM SECONDS DROP_AT OFFSET out.mp3
    e.g. python tools/make_test_song.py 128 60 20.625 0.37 data/work/test128.mp3
 The first loud beat at or after DROP_AT is the true drop. Used by tests/beats_detect.py.
 """
+import sys as _sys
+for _stream in (_sys.stdout, _sys.stderr):  # Windows: print safely even when output goes to a file
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import sys, subprocess
 import numpy as np
 SR = 44100
