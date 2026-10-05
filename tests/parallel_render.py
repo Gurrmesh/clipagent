@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="par_"))
+os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="par_")  # never touch the real data folder
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import media, render  # noqa: E402

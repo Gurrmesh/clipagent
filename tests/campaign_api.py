@@ -22,6 +22,9 @@ import sys
 import zipfile
 from pathlib import Path
 
+import os as _os
+import tempfile as _tempfile
+_os.environ["DATA_DIR"] = _tempfile.mkdtemp(prefix="clipagent_test_")  # never touch the real data folder
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
