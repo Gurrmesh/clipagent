@@ -1427,7 +1427,7 @@ $('camp-read').addEventListener('click', async () => {
   const done = busy($('camp-read'), 'Claude is reading it…');
   try {
     const r = await post('/api/campaigns/read', { brief });
-    CAMP.draft = r.rulebook; CAMP.brief = r.brief; CAMP.card = r.card; CAMP.edits = {}; CAMP.editingId = null;
+    CAMP.draft = r.rulebook; CAMP.brief = r.brief; CAMP.card = r.card; CAMP.edits = {}; CAMP.editingId = null; CAMP.found = '';
     location.hash = '#/campaigns/review';
   } catch (err) { toast(err.message, true); }
   finally { done(); }
@@ -1436,7 +1436,7 @@ async function campOpen(id, view) {
   try {
     const c = await api(`/api/campaigns/${id}`);
     if (view === 'rules') {
-      CAMP.draft = c.rulebook; CAMP.brief = c.brief; CAMP.card = c.card; CAMP.edits = {}; CAMP.editingId = c.id;
+      CAMP.draft = c.rulebook; CAMP.brief = c.brief; CAMP.card = c.card; CAMP.edits = {}; CAMP.editingId = c.id; CAMP.found = '';
       renderRulebook();
     } else campUse(c);
   } catch (err) { toast(err.message, true); location.hash = '#/campaigns'; }
@@ -1445,6 +1445,59 @@ async function campOpen(id, view) {
 /* ---------- the rulebook ---------- */
 const lines = v => (v || '').split('\n').map(s => s.trim()).filter(Boolean);
 const quote = (q, line) => q ? `<span class="quote">“${esc(q.length > 160 ? q.slice(0, 160) + '…' : q)}”${line ? ` <i>line ${line}</i>` : ''}</span>` : '';
+/* "2026-01-01" -> "2026 on"; "2026-03-02" -> "2 Mar 2026 on" */
+const dateRule = iso => /-01-01$/.test(iso) ? `${iso.slice(0, 4)} on`
+  : `${new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })} on`;
+/* Who and what the clips must be: the content rules, each with the line of the brief it came from. */
+function contentRulesHTML(rb, card) {
+  const r = card.resolved, mine = rb.by_you || [];
+  const src = (key, obj, has) => mine.includes(key) ? '<span class="quote"><i>you set this</i></span>' : has && obj ? quote(obj.quote, obj.line) : '';
+  const WHERE = { caption: 'Caption', overlay: 'Text on screen', either: 'Caption or text on screen', both: 'Caption and text on screen' };
+  const mm = r.must_mention || { names: [], where: 'either' };
+  const ban = (id, v) => `<select id="${id}">${Object.entries(card.ban_options || {}).map(([k, t]) =>
+    `<option value="${k}" ${(v || 'unstated') === k ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
+  const before = CAMP.editingId && !('look_for' in rb);     // saved before ClipAgent read these rules
+  return `
+      <h5>What the clips must be</h5>
+      ${before ? '<div class="rb-warn">This campaign was saved before ClipAgent read these rules from a brief. Press <b>Read the brief again</b> at the top to fill them in — nothing you set changes.</div>' : ''}
+      <div class="rb-grid rb-content">
+        <div>
+          <div class="field"><label for="rb-creator">Who the campaign is about</label>
+            <input id="rb-creator" type="text" value="${esc(rb.creator || '')}" placeholder="${esc(rb.brand || 'Not in the brief')}"></div>
+          <div class="field"><label for="rb-focus">Main person in every clip</label>
+            <input id="rb-focus" type="text" value="${esc(r.primary_focus || '')}" placeholder="Not in the brief"></div>
+          ${src('primary_focus', rb.primary_focus, r.primary_focus)}
+          <div class="field"><label for="rb-mention">Must be named in the post</label>
+            <input id="rb-mention" type="text" value="${esc(mm.names.join(', '))}" placeholder="Not in the brief — e.g. TJR"></div>
+          <div class="field"><label for="rb-where">Where</label><select id="rb-where">${Object.keys(card.mention_where || WHERE).map(k =>
+            `<option value="${k}" ${mm.where === k ? 'selected' : ''}>${esc(WHERE[k] || k)}</option>`).join('')}</select></div>
+          ${src('must_mention', rb.must_mention, mm.names.length)}
+          ${mm.names.length ? `<div class="hint">If Claude forgets, ClipAgent adds “${esc(mm.names[0])}:” to the start of the hook or caption.</div>` : ''}
+        </div>
+        <div>
+          <div class="field"><label for="rb-date">Only videos posted on or after</label>
+            <input id="rb-date" type="date" value="${esc(r.min_upload_date || '')}"></div>
+          <div class="hint">${r.min_upload_date ? 'An older video is stopped before any work starts. Clear the date for no rule.' : 'No date rule — any video is fine.'}</div>
+          ${src('min_upload_date', rb.min_upload_date, r.min_upload_date)}
+          <div class="field"><label for="rb-nologos">Logos or sponsor banners anywhere in the video</label>${ban('rb-nologos', r.no_logos)}</div>
+          ${src('no_logos', rb.no_logos, r.no_logos !== 'unstated')}
+          <div class="field"><label for="rb-noai">AI-generated video</label>${ban('rb-noai', r.no_ai)}</div>
+          ${src('no_ai', rb.no_ai, r.no_ai !== 'unstated')}
+        </div>
+      </div>
+      <div class="field rb-look"><label for="rb-look">What the campaign wants to see</label>
+        <textarea id="rb-look" rows="4" placeholder="Not in the brief — one kind of moment per line, e.g. Big wins">${esc((r.look_for || []).join('\n'))}</textarea></div>
+      <div class="hint">${(r.look_for || []).length ? 'Claude looks for moments like these first.' : 'Claude picks the strongest moments.'}${mine.includes('look_for') ? ' You set this list.' : ''}</div>`;
+}
+async function rereadBrief() {
+  const done = busy($('rb-reread'), 'Claude is reading the brief again…');
+  try {
+    const c = await post(`/api/campaigns/${CAMP.editingId}/reread`, { edits: collectEdits() });
+    CAMP.draft = c.rulebook; CAMP.brief = c.brief; CAMP.card = c.card; CAMP.edits = {}; CAMP.found = c.message;
+    renderRulebook();
+    toast((c.added || []).length ? `Found ${c.added.length} new rule${c.added.length > 1 ? 's' : ''} — saved` : 'Read it again — saved');
+  } catch (err) { toast(err.message, true); done(); }
+}
 function renderRulebook() {
   const rb = CAMP.draft, card = CAMP.card, r = card.resolved;
   const capt = rb.caption || {}, pay = rb.pay || {}, len = rb.length || {}, postr = rb.posting || {};
@@ -1462,11 +1515,14 @@ function renderRulebook() {
     </div>`;
   }).join('');
   const posting = [postr.public && 'Posts must be public', postr.comments_on && 'Likes and comments on', postr.no_paid_boost && 'No paid boosting',
-    postr.no_duplicates && 'Each post once per account', postr.collab === 'yes' && 'Collab posts allowed'].filter(Boolean);
+    postr.no_duplicates && 'Each post once per account', postr.collab === 'yes' && 'Collab posts allowed', postr.collab === 'no' && 'No collab posts'].filter(Boolean);
   $('camp-card').innerHTML = `
     <div class="rulebook">
       <h1 style="margin-bottom:6px">${CAMP.editingId ? 'Campaign rules' : 'Check what Claude found'}</h1>
       <p class="hint" style="margin-bottom:18px">${CAMP.editingId ? 'Change anything that’s wrong. Every clip made for this campaign follows these.' : 'Read it over and fix anything wrong. Nothing is saved until you press Save campaign.'}</p>
+      ${CAMP.editingId ? `<div class="rb-reread"><button id="rb-reread" type="button" class="btn ghost small">Read the brief again</button>
+        <span class="hint">Finds rules this campaign is missing. Every choice you made stays as it is.</span></div>` : ''}
+      ${CAMP.found ? `<div class="rb-found" role="status">${esc(CAMP.found)}</div>` : ''}
       <div class="rb-head">
         <div class="field"><label for="rb-name">Name</label><input id="rb-name" type="text" value="${esc(rb.name)}"></div>
         <div class="field"><label for="rb-mode">Kind of campaign</label><select id="rb-mode">${
@@ -1475,6 +1531,7 @@ function renderRulebook() {
       ${rb.mode_quote && rb.mode_quote.quote ? `<div>${quote(rb.mode_quote.quote, rb.mode_quote.line)}</div>` : ''}
       ${(rb.notes || []).length ? `<div class="rb-warn">${rb.notes.map(n => `<div>${esc(n)}</div>`).join('')}</div>` : ''}
       ${grey ? `<h5>The brief isn't clear about these — they stay off until you decide</h5>${grey}` : ''}
+      ${contentRulesHTML(rb, card)}
       <h5>What you may do to the footage</h5>
       <div id="rb-perms"></div>
       <div class="rb-grid">
@@ -1539,6 +1596,7 @@ function renderRulebook() {
   $('rb-plats').querySelectorAll('.chip').forEach(ch => ch.addEventListener('click', () => ch.classList.toggle('on')));
   $('rb-mode').addEventListener('change', () => previewCard());
   $('rb-save').addEventListener('click', saveRulebook);
+  if ($('rb-reread')) $('rb-reread').addEventListener('click', rereadBrief);
   $('rb-discard').addEventListener('click', () => { location.hash = CAMP.editingId ? `#/campaign/${CAMP.editingId}` : '#/campaigns'; });
 }
 function renderPerms() {
@@ -1572,6 +1630,10 @@ function collectEdits() {
       other_hashtags: $('rb-owntags').checked ? 'yes' : ((CAMP.draft.caption || {}).other_hashtags === 'yes' ? 'no' : (CAMP.draft.caption || {}).other_hashtags || 'unstated'),
     },
     hook_examples: lines($('rb-hooks').value),
+    creator: $('rb-creator').value.trim(), primary_focus: $('rb-focus').value.trim(),
+    must_mention: { names: $('rb-mention').value, where: $('rb-where').value },
+    min_upload_date: $('rb-date').value, no_logos: $('rb-nologos').value, no_ai: $('rb-noai').value,
+    look_for: lines($('rb-look').value),
   };
 }
 async function previewCard() {
@@ -1608,7 +1670,12 @@ function ruleChips(card) {
   (r.hashtags || []).forEach(t => chips.push([t.startsWith('#') ? t : '#' + t, 'hash']));
   if ((r.one_of || []).length) chips.push([`${r.one_of.length} required caption line${r.one_of.length > 1 ? 's' : ''}`, 'hash']);
   if (r.brand_logo === 'required') chips.push(['Brand logo on screen', '']);
-  if (r.brand_logo === 'forbidden' && !chips.some(([t]) => t === 'No logos or watermarks')) chips.push(['No logos', 'no']);
+  if ((r.brand_logo === 'forbidden' || r.no_logos === 'yes') && !chips.some(([t]) => t === 'No logos or watermarks')) chips.push(['No logos', 'no']);
+  if (r.no_ai === 'yes') chips.push(['No AI-made video', 'no']);
+  if (r.min_upload_date) chips.push([`Videos from ${dateRule(r.min_upload_date)}`, '']);
+  if (r.primary_focus) chips.push([`${r.primary_focus} in focus`, '']);
+  if (r.must_mention) chips.push([`Name ${r.must_mention.names[0]}`, 'hash']);
+  if ((r.look_for || []).length) chips.push([`Wants: ${r.look_for.slice(0, 2).join(', ')}${r.look_for.length > 2 ? '…' : ''}`, '']);
   if (r.posting && r.posting.no_duplicates) chips.push(['Once per account', '']);
   const pay = r.pay || {};
   if (pay.per_1k) chips.push([`$${(+pay.per_1k).toFixed(2)} per 1K views`, 'pay']);
@@ -1673,7 +1740,12 @@ async function campUse(c) {
     placeShared('campaign');
     lockShared(c.card);
     const off = c.card.permissions.filter(p => !p.allowed && ['cut', 'crop', 'zoom', 'stitch', 'audio', 'captions', 'hook', 'watermark'].includes(p.key));
-    $('cu-locks').textContent = off.length ? `The brief doesn't allow: ${off.map(p => p.label.toLowerCase()).join(', ')}. Those stay off.` : '';
+    const r = c.card.resolved, banned = p => p.source === 'brief' || (p.key === 'watermark' && (r.no_logos === 'yes' || r.brand_logo === 'forbidden'));
+    const said = off.filter(banned), unsure = off.filter(p => !banned(p) && ['grey', 'default', 'unverified'].includes(p.source)),
+      yours = off.filter(p => p.source === 'you' && !banned(p)), names = ps => ps.map(p => p.label.toLowerCase()).join(', ');
+    $('cu-locks').textContent = [said.length && `The brief doesn't allow: ${names(said)}.`,
+      unsure.length && `Off because the brief doesn't say: ${names(unsure)} — if you're sure it's allowed, switch it on under Rules.`,
+      yours.length && `You switched off: ${names(yours)}.`].filter(Boolean).join(' ');
   } else placeShared('make');
   // what it has produced so far
   const st = (CAMP.list.find(x => x.id === c.id) || {}).stats;

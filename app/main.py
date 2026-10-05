@@ -711,6 +711,36 @@ def update_campaign(campaign_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
     return _campaign_json(store.get_campaign(campaign_id))
 
 
+@app.post("/api/campaigns/{campaign_id}/reread")
+def reread_campaign(campaign_id: str, body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """Claude reads the saved brief again; rules the saved campaign is missing
+    are added, and nothing you decided changes. Unsaved changes on the card
+    come along in `edits` and are saved first."""
+    camp = store.get_campaign(campaign_id)
+    if not camp:
+        raise HTTPException(404, "Campaign not found")
+    brief = (camp.get("brief") or "").strip()
+    if len(brief) < 40:
+        raise HTTPException(400, "This campaign has no saved brief to read again. Paste the brief into a new "
+                                 "campaign instead.")
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(400, "Reading a brief needs Claude — add ANTHROPIC_API_KEY to your .env")
+    saved = camp["rulebook"]
+    edits_now = (body or {}).get("edits") or {}
+    if edits_now:
+        saved = campaign.merge_user_edits(saved, edits_now, brief)
+    try:
+        fresh = campaign.read_brief(brief)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, f"Claude couldn't read the brief: {exc}"[:300])
+    rb, added, fixed = campaign.merge_reread(saved, fresh)
+    store.save_campaign(rb["name"], rb["mode"], brief, rb, campaign_id)
+    return {**_campaign_json(store.get_campaign(campaign_id)), "added": added, "fixed": fixed,
+            "message": campaign.reread_message(added, fixed)}
+
+
 @app.delete("/api/campaigns/{campaign_id}")
 def remove_campaign(campaign_id: str) -> Dict[str, Any]:
     store.delete_campaign(campaign_id)

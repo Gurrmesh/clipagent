@@ -13,6 +13,7 @@ A clip comes out as one of:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -98,6 +99,59 @@ def _caption(r: Dict[str, Any], post: Dict[str, Any]) -> List[Dict[str, str]]:
         out.append(_item("mentions", "Required tags", "fail" if missing_m else "pass",
                          ("Missing " + " ".join(missing_m)) if missing_m else "All tagged."))
     return out
+
+
+def _upload_date(r: Dict[str, Any], meta: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    """The source video is recent enough for a brief with a date rule ("2026 onwards")."""
+    need = r.get("min_upload_date") or ""
+    if not need:
+        return None
+    rule = campaign.date_rule_words(need)
+    posted = campaign.upload_date_of(meta)
+    label = "When the video was posted"
+    if not posted:
+        return _item("upload_date", label, "warn",
+                     f"Check first: couldn't confirm when this video was posted (the campaign only takes videos "
+                     f"{'from ' + need[:4] + ' on' if need.endswith('-01-01') else 'posted ' + rule}).")
+    if posted < need:
+        return _item("upload_date", label, "fail",
+                     f"Posted on {campaign.date_words(posted)} — the campaign only takes videos posted {rule}.")
+    return _item("upload_date", label, "pass", f"Posted on {campaign.date_words(posted)} — {rule}, as the brief asks.")
+
+
+def _must_mention(r: Dict[str, Any], on_screen: List[str], caption: str,
+                  hook_allowed: bool = True) -> Optional[Dict[str, str]]:
+    """The name the brief says the caption and/or the text on screen must carry."""
+    mm = r.get("must_mention")
+    if not mm:
+        return None
+    names, where = mm["names"], mm["where"]
+    who = " or ".join(names)
+    screen = any(campaign.mentions_name(t, names, hashtags_count=False) for t in on_screen if (t or "").strip())
+    cap = campaign.mentions_name(re.sub(r"#\w+", " ", caption or ""), names, hashtags_count=False)
+    need = {"caption": cap, "overlay": screen, "either": cap or screen, "both": cap and screen}[where]
+    label = f"Mentions {who}"
+    if need:
+        found = [w for w, ok in (("the caption", cap), ("the text on screen", screen)) if ok]
+        return _item("must_mention", label, "pass", f"Named in {' and '.join(found)}, as the brief asks.")
+    if where in ("overlay", "both") and not screen and not hook_allowed:
+        return _item("must_mention", label, "fail",
+                     f"The brief wants {who} named in text on screen, but it doesn't allow text on screen — "
+                     "check the campaign's rules.")
+    fix = {"caption": "the caption", "overlay": "the hook", "either": "the hook or the caption",
+           "both": " and ".join(w for w, ok in (("the hook", screen), ("the caption", cap)) if not ok)}[where]
+    return _item("must_mention", label, "fail",
+                 f"The brief says {who} must be named {campaign.MENTION_WHERE[where]}, and it isn't. "
+                 f"Add {names[0]} to {fix} in the editor.")
+
+
+def _screen_texts(edits: Dict[str, Any], hook: str) -> List[str]:
+    """Every piece of text a source clip shows: the hook, a card, the headline."""
+    texts = [hook or ""]
+    texts += [c.get("text") or "" for c in (edits.get("cards") or []) if isinstance(c, dict)]
+    if edits.get("headline_on"):
+        texts.append(edits.get("headline") or "")
+    return texts
 
 
 def _tone(tone: Optional[Dict[str, str]], hook: str) -> Dict[str, str]:
@@ -244,6 +298,9 @@ def check_overlay(rb: Dict[str, Any], source: Path, output: Path, made: Dict[str
     if logo_item:
         checks.append(logo_item)
     checks += _caption(r, post)
+    mention = _must_mention(r, [hook], post.get("text") or post.get("caption") or "", a["hook"])
+    if mention:
+        checks.append(mention)
     checks.append(_platform(r, post.get("platform", "")))
     checks.append(_tone(tone, hook))
     result = summarize(checks)
@@ -255,9 +312,11 @@ def check_overlay(rb: Dict[str, Any], source: Path, output: Path, made: Dict[str
 
 
 def check_source(rb: Dict[str, Any], clip: Dict[str, Any], edits: Dict[str, Any], output: Path,
-                 post: Dict[str, Any], hook: str, tone: Optional[Dict[str, str]]) -> Dict[str, Any]:
+                 post: Dict[str, Any], hook: str, tone: Optional[Dict[str, str]],
+                 source_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """A clip cut from longer footage: length, plus every switch the brief forbids
-    is confirmed off in what was actually rendered."""
+    is confirmed off in what was actually rendered. `source_meta` is what the
+    download learned about the video (its upload date), for a brief's date rule."""
     r = campaign.resolve(rb)
     a = r["allowed"]
     checks: List[Dict[str, str]] = []
@@ -266,6 +325,9 @@ def check_source(rb: Dict[str, Any], clip: Dict[str, Any], edits: Dict[str, Any]
     except Exception:
         seconds = float(clip.get("end", 0)) - float(clip.get("start", 0)) - float(clip.get("saved") or 0)
     checks.append(_length(r, seconds))
+    dated = _upload_date(r, source_meta)
+    if dated:
+        checks.append(dated)
 
     parts = clip.get("parts") or []
     if not a["stitch"]:
@@ -315,8 +377,13 @@ def check_source(rb: Dict[str, Any], clip: Dict[str, Any], edits: Dict[str, Any]
         checks.append(logo_item)
 
     checks += _caption(r, post)
+    shown = hook if edits.get("hook_on", True) else ""
+    mention = _must_mention(r, _screen_texts(edits, shown), post.get("text") or post.get("caption") or "",
+                            a["hook"])
+    if mention:
+        checks.append(mention)
     checks.append(_platform(r, post.get("platform", "")))
-    checks.append(_tone(tone, hook if edits.get("hook_on", True) else ""))
+    checks.append(_tone(tone, shown))
     result = summarize(checks)
     result["measured"] = {"duration": round(seconds, 3)}
     return result
@@ -377,6 +444,10 @@ def check_edit(rb: Dict[str, Any], timeline: Dict[str, Any], output: Path, post:
             logo["detail"] = "The brief requires the brand's logo on screen — edits can't add it yet. Make clips instead."
         checks.append(logo)
     checks += _caption(r, post)
+    mention = _must_mention(r, [hook] + [s.get("text") or "" for s in segs],
+                            post.get("text") or post.get("caption") or "", a["hook"])
+    if mention:
+        checks.append(mention)
     checks.append(_tone(tone, hook))
     result = summarize(checks)
     result["measured"] = {"duration": round(seconds, 3)}
