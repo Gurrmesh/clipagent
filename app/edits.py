@@ -362,8 +362,24 @@ on a line that sticks — ideally one that leads naturally back into the opening
 """
 
 
+def before_drop(style: str, sound: Optional[Dict[str, Any]]) -> Optional[Tuple[int, float]]:
+    """For a beat edit on this song: how many shots fit before the drop, and how many seconds in it comes."""
+    style = style_key(style)
+    st = STYLES[style]
+    analysis = (sound or {}).get("analysis") or {}
+    if st["pace"] != "beat" or len(analysis.get("beats") or []) < 4:
+        return None
+    g = beat_grid(analysis)
+    first_real = next(i for i, t in enumerate(g["t"]) if t >= -0.01)
+    drop_i = _nearest(g["t"], float(analysis.get("drop") or 0.0))
+    pre = drop_i - max(first_real, drop_i - st["pre_beats"])
+    build = _patterns(style, g["period"])[0][0]
+    return -(-pre // build), pre * g["period"]
+
+
 def pick_moments(sources: List[Dict[str, Any]], style: str, theme: str, length: int,
-                 guidance: str = "", candidates: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                 guidance: str = "", candidates: Optional[List[Dict[str, Any]]] = None,
+                 sound: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """One Claude call → the edit's hook, caption, hashtags and moments in play order.
 
     `candidates` (moments already found and scored, e.g. by Creator Scan) are
@@ -382,6 +398,11 @@ def pick_moments(sources: List[Dict[str, Any]], style: str, theme: str, length: 
               + f"\n\nTHE EDIT: a {st['name']} edit, about {length} seconds long. {st['what']}\n"
               + f"What it's about: {theme.strip() or 'the best moments'}\n"
               + f"Moments: {st['brief']} Return {lo} to {hi} moments.")
+    fit = before_drop(style, sound)
+    if fit:
+        k, secs = fit
+        prompt += (f"\nThe song drops {secs:.1f} seconds in: only {k} moment{'s' if k != 1 else ''} play before the "
+                   f"drop (the opener{' and the build' if k > 1 else ''}), the drop moment comes next, the rest after.")
     system = PICK_SYSTEM + (f"\n\nCAMPAIGN RULES (these override the rest):\n{guidance}" if guidance else "")
     client = highlights._client()
     message = client.messages.create(model=CLAUDE_MODEL, max_tokens=6000, system=system, tools=[PICK_TOOL],
@@ -769,6 +790,9 @@ def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, ana
     drop_m = next((m for m in ordered if m.get("drop")), ordered[len(ordered) // 2])
     di = ordered.index(drop_m)
     before, after_m = ordered[:di], ordered[di + 1:]
+    if len(before) > ds >= 1:                                # more than fits before the drop: they play after it
+        after_m = before[ds:] + after_m
+        before = before[:ds]
     if ds > 0 and not before:
         before = [after_m.pop(0)] if len(after_m) > 1 else [drop_m]
     if len(slots) - ds - 1 > 0 and not after_m:
@@ -889,18 +913,18 @@ def _speech_timeline(ordered: List[Dict[str, Any]], style: str, length: float, a
         song: List[Dict[str, Any]] = [{} for _ in chosen]      # song-time start, end and pre-roll per moment
 
         hit_rel = drop_m["hit"] - drop_m["start"]
-        s_start = grid[_at_or_before(grid, drop - hit_rel)]
+        s_start = grid[_at_or_before(grid, drop - hit_rel, 0.0)]
         pre = (drop - hit_rel) - s_start
         span = drop_m["end"] - drop_m["start"]
-        song[di] = {"start": s_start, "pre": pre, "end": grid[_at_or_after(grid, s_start + pre + span)]}
+        song[di] = {"start": s_start, "pre": pre, "end": grid[_at_or_after(grid, s_start + pre + span, 0.0)]}
         for n in range(di + 1, len(chosen)):                  # after the drop: hold to the next beat
             span = chosen[n]["end"] - chosen[n]["start"]
             s = song[n - 1]["end"]
-            song[n] = {"start": s, "pre": 0.0, "end": grid[_at_or_after(grid, s + span)]}
+            song[n] = {"start": s, "pre": 0.0, "end": grid[_at_or_after(grid, s + span, 0.0)]}
         for n in range(di - 1, -1, -1):                       # before it: start on the beat before, a breath early
             span = chosen[n]["end"] - chosen[n]["start"]
             e = song[n + 1]["start"]
-            s = grid[_at_or_before(grid, e - span)]
+            s = grid[_at_or_before(grid, e - span, 0.0)]
             song[n] = {"start": s, "pre": (e - span) - s, "end": e}
         s0 = song[0]["start"]
         end = song[-1]["end"]
@@ -1095,8 +1119,9 @@ def plan_edit(eid: str, repick: bool) -> Dict[str, Any]:
     words = words_for_sources([x["id"] for x in sources])
     if repick or not plan.get("moments"):
         _stage(eid, "Picking the moments", 8)
+        sound = store.get_sound(s.get("sound") or "") if s.get("sound") else None
         picked = pick_moments(sources, s["style"], s.get("theme", ""), s["length"],
-                              campaign.picker_guidance(rules) if rules else "", plan.get("candidates"))
+                              campaign.picker_guidance(rules) if rules else "", plan.get("candidates"), sound)
         snap_moments(picked["moments"], s["style"], words)
         tags = picked["hashtags"]
         if rules:
