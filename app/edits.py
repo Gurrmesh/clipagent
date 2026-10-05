@@ -180,6 +180,18 @@ def add_sound(src: Path, name: str) -> Dict[str, Any]:
     return store.get_sound(sid)
 
 
+def _remove(path: Path) -> None:
+    """Delete a file we made; on Windows a file that's open (playing in the browser) is tried again, then left."""
+    for _ in range(5):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            time.sleep(0.3)
+        except OSError:
+            return
+
+
 def delete_sound(sid: str) -> None:
     sound = store.get_sound(sid)
     if not sound:
@@ -189,7 +201,7 @@ def delete_sound(sid: str) -> None:
     if busy:
         raise ValueError("An edit with this song is being made right now — wait until it's done")
     if sound.get("file"):
-        Path(sound["file"]).unlink(missing_ok=True)
+        _remove(Path(sound["file"]))
     store.delete_sound(sid)
 
 
@@ -1461,9 +1473,13 @@ def undo(eid: str) -> Dict[str, Any]:
     if not prev or not (d / f"{eid}.mp4").is_file():
         raise ValueError("There's nothing to undo")
     EDIT_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(d / f"{eid}.mp4"), EDIT_DIR / f"{eid}.mp4")
-    if (d / f"{eid}.jpg").is_file():
-        shutil.move(str(d / f"{eid}.jpg"), EDIT_DIR / f"{eid}.jpg")
+    from .editrender import swap_in
+    try:
+        swap_in(d / f"{eid}.mp4", EDIT_DIR / f"{eid}.mp4")
+        if (d / f"{eid}.jpg").is_file():
+            swap_in(d / f"{eid}.jpg", EDIT_DIR / f"{eid}.jpg")
+    except RuntimeError as exc:
+        raise ValueError(str(exc).replace("press Re-make", "press Undo again")) from exc
     store.update_edit(eid, settings=prev["settings"], plan=prev["plan"], title=prev.get("title") or edit["title"],
                       caption=prev.get("caption") or "", hashtags=prev.get("hashtags") or [],
                       compliance=prev.get("compliance"), undo=None, status="done", stage="Done", progress=100,
@@ -1581,8 +1597,7 @@ def delete(eid: str) -> None:
         raise ValueError("This edit is still being made — wait until it's done, then delete it")
     for p in [EDIT_DIR / f"{eid}.mp4", EDIT_DIR / f"{eid}.jpg", EDIT_DIR / "undo" / f"{eid}.mp4",
               EDIT_DIR / "undo" / f"{eid}.jpg"] + list((EDIT_DIR / "moments").glob(f"{eid}_*.jpg")):
-        if p.is_file():
-            p.unlink()
+        _remove(p)
     store.delete_edit(eid)
 
 

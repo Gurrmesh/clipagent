@@ -733,6 +733,23 @@ def normalize(raw: Path, out: Path, target: float = TARGET_LUFS) -> float:
 
 # --- the render -----------------------------------------------------------------------------
 
+def swap_in(tmp: Path, out: Path) -> None:
+    """Put the new video in place of the old one. Windows refuses to replace a file another program has open
+    (the browser playing the edit): wait a little, then copy over it instead."""
+    import shutil
+    for _ in range(12):
+        try:
+            tmp.replace(out)
+            return
+        except PermissionError:
+            time.sleep(0.4)
+    try:
+        shutil.copyfile(tmp, out)
+        tmp.unlink(missing_ok=True)
+    except OSError as exc:
+        raise RuntimeError("The new version is made but couldn't replace the old one — it's open somewhere. "
+                           "Close the video and press Re-make.") from exc
+
 def _groups(segs: List[Dict[str, Any]]) -> List[List[int]]:
     """Segments read with one decoder: same moment, footage running on."""
     groups: List[List[int]] = []
@@ -943,7 +960,7 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
         if code != 0 or not tmp_out.exists():
             tail = "\n".join(err.splitlines()[-8:])
             raise RuntimeError(f"The video couldn't be written ({code}):\n{tail}")
-        tmp_out.replace(out_path)
+        swap_in(tmp_out, out_path)
         at = min(L - 0.1, (tl.get("drop_at") or L / 3) + 0.15)
         subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{max(0.0, at):.2f}",
                         "-i", str(out_path), "-frames:v", "1", "-q:v", "3", str(thumb_path)], capture_output=True)

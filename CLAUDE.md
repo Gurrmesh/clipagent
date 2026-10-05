@@ -11,7 +11,7 @@ explained with what to do next.
 
 Next work is described in:
 - `docs/STATUS.md` — every feature that exists today, known issues, and the backlog
-- `docs/EDIT_MAKER_PLAN.md` — the Edit Maker (music-driven edits): full spec and build steps
+- `docs/EDIT_MAKER_PLAN.md` — the Edit Maker (music-driven edits): full spec and build steps (built — see STATUS)
 - `docs/CREATOR_SCAN_PLAN.md` — Creator Scan (go through a creator's whole catalog): full spec and build steps
 - `docs/SMART_STITCH_PLAN.md` — Smart Stitch (teaser openings, proof/reaction inserts, and clips that combine parts
   from different videos): full spec and build steps
@@ -71,11 +71,15 @@ and ends with `all checks behaved`. They use a temp `DATA_DIR`, stand-ins for Cl
 | `clip_doctor.py <clip.mp4>` | the clip doctor (needs any rendered clip as argument) |
 | `source_quality.py` | download/source handling |
 | `beats_detect.py` | beat + drop detection for the Edit Maker |
+| `edit_timeline.py` | Edit Maker plan: cuts on the beat, the drop, speed curves, speech edits, song part, Claude's picks checked |
+| `edit_render.py` | Edit Maker render (~50 s): size, length, -14 LUFS, flash, glitch, right frames, lip sync, words off the face |
+| `edit_api.py` | Edit Maker endpoints (~25 s): songs, edits, re-make, undo, typed changes, versions, campaign rules, Telegram |
+| `motion_match.py` | Flow edits: measured motion, cut costs, the chain, motion-blur direction |
 | `parallel_render.py <source.mp4> ...` | parallel rendering (slow, needs a real source) |
 | `campaign_api.py`, `campaign_gate.py`, `brand_logo.py`, `watch_clips.py` | campaign mode (some need sample files) |
 
 Always run the fast suites (`ui_api`, `ask_changes`, `money_side`, `telegram_updates`, `style_brain`,
-`beats_detect`) after a change, and check real output by eye: pull frames with ffmpeg
+`beats_detect`, `edit_timeline`, `motion_match`, `edit_api`, `edit_render`) after a change, and check real output by eye: pull frames with ffmpeg
 (`ffmpeg -ss 5 -i data\clips\<id>.mp4 -frames:v 1 frame.jpg`) and look at them.
 
 ---
@@ -111,9 +115,12 @@ FastAPI backend (`app/`), one-page front end (`templates/index.html`, `static/ap
   re-render in turn, undo snapshot kept (`data/undo/<clip>/`).
 - `money.py` — posts, view checks (yt-dlp; Instagram typed by hand), earnings by the campaign's pay terms, posting
   planner (12:00 / 16:30 / 20:30), reminders, channel watch/scout, 9:00 morning summary; background `money.tick` every 60 s.
-- `beats.py` — **new, done, tested**: song tempo, beats, bars, the drop (numpy only).
-- `edits.py` — **new, draft**: Edit Maker planning (styles, moment picking, beat timeline). Needs `editrender.py`,
-  endpoints and UI — see `docs/EDIT_MAKER_PLAN.md`.
+- **Edit Maker** (`docs/EDIT_MAKER_PLAN.md`): `beats.py` (song tempo, beats, bars, the drop; numpy only);
+  `edits.py` (7 styles, songs, Claude's picks checked, the pure `build_timeline` — beat grid, speed curves, speech
+  pace, song part — campaign fit, run/remake/undo/ask/versions, `data/edits/`); `editrender.py` (frames drawn in
+  Python with OpenCV, ASS words, the voice + song mix at -14 LUFS, one x264 encode); `motionmatch.py` (Flow: DIS
+  optical flow per shot, chained by motion); `compliance.check_edit` (the campaign gate for edits).
+  `tools/make_test_footage.py` draws a talking-head test video; `tools/make_test_song.py` makes test songs.
 - `store.py` — all tables: jobs, clips, transcripts, presets, campaigns, requests, sounds, edits (+ migrations dict
   for added columns).
 - `toolio.py` — read Claude's tool calls defensively (Claude sometimes returns JSON-in-a-string).
@@ -127,11 +134,15 @@ Clips: `GET /api/clips/{id}`, `POST /api/clips/{id}/render` (editor), `POST /api
 Asks: `POST /api/jobs/{id}/ask`, `GET /api/jobs/{id}/asks`, `GET /api/asks/{id}`.
 Campaigns: `POST /api/campaigns/read|preview`, `POST|GET /api/campaigns`, `GET|PUT|DELETE /api/campaigns/{id}`,
 logo upload, `POST /api/campaigns/{id}/jobs` (clip-bank runs).
+Edits: `GET|POST /api/sounds`, `DELETE /api/sounds/{id}`, `/media/sound/{id}`, `GET /api/edit-sources`,
+`GET /api/edit-styles`, `GET /api/edit-campaigns`, `POST|GET /api/edits`, `GET|DELETE /api/edits/{id}`,
+`POST /api/edits/{id}/remake|ask|undo|versions|post`, `GET /api/edits/{id}/download`, `/media/edit/*`,
+`/media/edit-moment/{id}/{moment}.jpg`.
 Money: `GET /api/money`, `POST /api/posts`, `POST /api/posts/{id}`, `/check`, `DELETE`, `POST /api/money/settings`,
 `POST /api/watch|unwatch`. Also presets, brand logo, `/media/*`, `/healthz`.
 
 ### Front end
-- Hash routes: `#/make`, `#/videos`, `#/video/<id>`, `#/campaigns`, `#/campaigns/new`, `#/campaigns/review`,
+- Hash routes: `#/make`, `#/videos`, `#/video/<id>`, `#/edits`, `#/edits/from/<job>`, `#/edit/<id>`, `#/campaigns`, `#/campaigns/new`, `#/campaigns/review`,
   `#/campaign/<id>`, `#/campaign/<id>/rules`, `#/money`, `#/settings`.
 - Design (Crayo-inspired): sidebar (bottom tab bar on phones), light + dark themes with a switch (tokens on `:root`,
   `[data-theme="dark"]` overrides; accent #5B3DF5 light / #8A72FF dark; pop yellow #FFD400), Plus Jakarta Sans UI font,

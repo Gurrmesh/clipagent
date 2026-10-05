@@ -1,6 +1,6 @@
 # ClipAgent — what exists, what's broken, what's next
 
-Last updated: 5 Oct 2026, at the hand-over from the Claude chat session to Claude Code.
+Last updated: 5 Oct 2026 — the Edit Maker is built (waiting for gs to try it on the PC).
 
 ## 1. Features that exist and work (tested on the PC)
 
@@ -25,6 +25,28 @@ Last updated: 5 Oct 2026, at the hand-over from the Claude chat session to Claud
 - Editor: Ask, Text (hook/card/headline), Captions (look, position, size, words), Framing (layout, crop, facecam,
   camera moves, cut dead air), Post (caption + hashtags, saved), Check (campaign check + clip doctor). Trim timeline
   with waveform and click-a-word. Re-render keeps an undo copy; a failed re-render keeps the old clip.
+
+### Edits (the Edit Maker) — built in Claude Code, to be tried on the PC
+- **Edits** in the sidebar. Make an edit: tick one or more finished videos, pick one of 7 styles (Velocity, Aura,
+  Flow, Cinematic, Motivation, Funny, Money — each card plays a tiny sample), pick a song (yours: MP3/M4A/WAV or a
+  video's sound; play, BPM, drop marked on its loudness curve) or No music for the voice styles, say what it's
+  about, the length, and optionally a campaign.
+- Claude picks the moments and writes the hook (numbers on screen must be ones he said). Cuts land exactly on the
+  beat, the best moment's hit on the drop, the edit ends on a bar line and dissolves back into its first frame so it
+  loops. Speed ramps, slow-mo, flashes, zoom punches, shake, RGB glitch, motion-blurred cuts (Flow chains shots so
+  the movement carries on), push-ins, grain, dark corners, cinema bars, one colour grade over every video (each
+  moment's colour matched first). Voice styles keep every sentence whole and duck the song under his voice. Sound
+  at -14 LUFS.
+- The edit page: looping preview, Download, Copy caption, Undo; "Tell ClipAgent what to change" ("faster", "black
+  and white", "put the 2 million line on the drop", "different song"); change it by hand (style, song, the part of
+  the song, colour, length, cut speed, flashes, every effect, voice/music, hook, moments: words, on/off, on the drop,
+  order); Re-make (no Claude) or New moments; versions with your other songs; the caption to post.
+- Campaigns: refused in plain words when the brief doesn't allow joining moments, cropping or music; speed changes,
+  zooms, text, captions or bars it doesn't allow are switched off with a note; the brief's lines and hashtags go in
+  the caption; the finished edit goes through the campaign check (blocked = no download without "anyway").
+- Telegram: finished edits are sent with the caption and verdict; `/edit velocity his biggest wins` makes an edit of
+  the last video with the last song.
+- A 20 s edit renders in ~25 s on a 4-core cloud machine (the PC should be similar).
 
 ### Campaigns
 - Paste a brief → Claude reads it into a rulebook (permissions with quotes and line numbers, grey areas to decide,
@@ -63,16 +85,20 @@ Light / dark / match computer; Telegram status and setup steps; brand logo + cor
 - Undo is one step deep. Typed change requests can't create a brand-new clip from another part of the video yet.
 - The editor needs the original video on disk (`data/sources`) to trim or re-render.
 - Test leftovers in My videos: two "Conan O'Brien…" re-runs made while testing (gs can delete).
+- **Edit Maker, still to check on the PC**: typed changes and moment picking were only tested with a stand-in for
+  Claude (no key in the cloud); face framing in edits was tested on drawn faces, not real footage.
+- **Beat finder on some songs**: on a song whose hi-hats are much louder than its kick drum, the beat finder can lock
+  onto the off-beats — every cut would then land between beats. Watch the first edits on new songs; if it happens,
+  tell Claude Code which song.
 
 ## 3. In progress at hand-over
 - **TJR campaign**: saved as "TJR — Reach"; a batch of 3 TJR videos was queued (7 Years of Trading Advice in 10
   Minutes; TJR Reacts to the TJR and Aiden videos; Teaching My Friend How To Day Trade). The first finished (6 clips:
   5 ready, 1 to check). Check the others in My videos.
-- **Edit Maker**: `app/beats.py` done + tested (`tests/beats_detect.py`); `app/edits.py` drafted (styles, moment
-  picking, beat timeline); `store.py` has the `sounds` and `edits` tables. Next: `docs/EDIT_MAKER_PLAN.md`.
+- **Edit Maker**: built and tested in the cloud (pull request open) — waiting for gs to try it on the PC.
 
 ## 4. Backlog, in order
-1. Edit Maker — `docs/EDIT_MAKER_PLAN.md`
+1. ~~Edit Maker — `docs/EDIT_MAKER_PLAN.md`~~ built (see above).
 2. Creator Scan (whole-catalog search) — `docs/CREATOR_SCAN_PLAN.md`
 3. Smart Stitch — `docs/SMART_STITCH_PLAN.md`: Part 1 (teaser opening, proof/reaction/callback inserts, stitching
    funny/hype moments when a setup elsewhere helps), Part 2 (clips that combine parts from different videos: then vs
