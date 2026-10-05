@@ -1231,7 +1231,13 @@ def create(settings: Dict[str, Any], plan: Optional[Dict[str, Any]] = None, titl
     eid = store.create_edit(title or f"{STYLES[clean['style']]['name']} edit — {titles[0][:50]}", clean,
                             clean["campaign_id"])
     if plan:
-        store.update_edit(eid, plan=plan)
+        plan = dict(plan)
+        post = plan.get("post") or {}
+        rules = _rules(clean)
+        if rules:                                     # a campaign's own lines and hashtags, whatever came in
+            plan["post"] = _post(rules, post.get("caption") or "", post.get("hashtags") or [])
+        store.update_edit(eid, plan=plan, caption=(plan.get("post") or {}).get("caption", ""),
+                          hashtags=(plan.get("post") or {}).get("hashtags", []))
     threading.Thread(target=run, args=(eid, not (plan and plan.get("moments"))), daemon=True).start()
     return eid
 

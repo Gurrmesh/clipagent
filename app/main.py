@@ -309,6 +309,9 @@ def friendly_error(text: str) -> str:
     if low.startswith("error:") or "[youtube]" in low or "[generic]" in low or "unsupported url" in low \
             or "unable to download" in low or "sign in to confirm" in low:
         return media.explain_download_error(t)
+    if "anthropic_api_key is not set" in low or "anthropic package not installed" in low:
+        return ("The Claude key is missing, so ClipAgent can't pick moments. Put it in the .env file "
+                "(Settings → Connections shows what's missing), restart ClipAgent, then press Try again.")
     if "error code: 413" in low or "request entity too large" in low:
         return "The audio was too big to send for transcription in one go. Press Try again."
     if "error code: 401" in low or "invalid x-api-key" in low or "incorrect api key" in low:
@@ -939,12 +942,27 @@ def edit_sources() -> Dict[str, Any]:
 def edit_styles() -> Dict[str, Any]:
     return {
         "styles": [{"id": k, "name": v["name"], "what": v["what"], "pace": v["pace"], "length": v["length"],
+                    "text": v["text"],
                     "needs_music": bool(v.get("needs_music")), "music_optional": bool(v.get("music_optional")),
                     "effects": v["effects"], "grade": v["grade"], "voice": v["voice"], "music": v["music"]}
                    for k, v in edits.STYLES.items()],
         "effects": edits.EFFECTS, "grades": edits.GRADES, "lengths": list(edits.LENGTHS),
         "paces": list(edits.PACES), "flashes": edits.FLASHES, "rights": RIGHTS_NOTE,
     }
+
+
+@app.get("/api/edit-campaigns")
+def edit_campaigns(style: str = "velocity") -> Dict[str, Any]:
+    """Each clip-from-footage campaign, and what its brief lets an edit in this style do."""
+    out = []
+    for c in store.list_campaigns():
+        camp = store.get_campaign(c["id"])
+        if not camp or camp.get("mode") == "overlay":
+            continue
+        _, notes, refusal = edits.campaign_fit(camp["rulebook"], style)
+        out.append({"id": c["id"], "name": c["name"], "refusal": refusal, "notes": notes,
+                    "music": campaign.allowed(camp["rulebook"], "music")})
+    return {"campaigns": out}
 
 
 @app.post("/api/edits")

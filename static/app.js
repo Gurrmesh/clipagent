@@ -74,14 +74,16 @@ document.querySelectorAll('[data-theme-choice]').forEach(b => b.addEventListener
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (themeChoice() === 'system') applyTheme('system'); });
 
 /* ---------- routing ---------- */
-const PAGES = ['make', 'videos', 'video', 'campaigns', 'camp-new', 'rules', 'campaign', 'money', 'settings'];
-const NAV_OF = { make: 'make', videos: 'videos', video: 'videos', campaigns: 'campaigns', 'camp-new': 'campaigns', rules: 'campaigns', campaign: 'campaigns', money: 'money', settings: 'settings' };
+const PAGES = ['make', 'videos', 'video', 'edits', 'edit', 'campaigns', 'camp-new', 'rules', 'campaign', 'money', 'settings'];
+const NAV_OF = { make: 'make', videos: 'videos', video: 'videos', edits: 'edits', edit: 'edits', campaigns: 'campaigns', 'camp-new': 'campaigns', rules: 'campaigns', campaign: 'campaigns', money: 'money', settings: 'settings' };
 
 function showPage(name) {
   PAGES.forEach(p => $(`page-${p}`).classList.toggle('hidden', p !== name));
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.route === NAV_OF[name]));
   if (name !== 'video') { clearInterval(poll); poll = null; }
   if (name !== 'videos' && name !== 'make') { clearInterval(listPoll); listPoll = null; }
+  if (name !== 'edit') { clearInterval(EE.poll); EE.poll = null; }
+  if (name !== 'edits') { clearInterval(EM.listPoll); EM.listPoll = null; stopSong(); }
   window.scrollTo(0, 0);
 }
 
@@ -92,6 +94,8 @@ function route() {
   OVERLAY_HASH = null; closeEditor(true); closeKit(true);
   if (page === 'video' && id) { showPage('video'); openVideo(id); }
   else if (page === 'videos') { showPage('videos'); loadVideos(); }
+  else if (page === 'edits') { showPage('edits'); editsHome(id === 'from' ? sub : ''); }
+  else if (page === 'edit' && id) { showPage('edit'); openEdit(id); }
   else if (page === 'campaigns' && id === 'new') { showPage('camp-new'); $('camp-brief').focus(); }
   else if (page === 'campaigns' && id === 'review') { if (CAMP.draft) { showPage('rules'); renderRulebook(); } else location.hash = '#/campaigns'; }
   else if (page === 'campaigns') { showPage('campaigns'); campHome(); }
@@ -164,6 +168,11 @@ async function refreshWorking() {
     $('nav-working').textContent = n;
     $('nav-working').classList.toggle('hidden', !n);
     $('nav-working').title = `${n} working`;
+    const { edits } = await api('/api/edits?limit=20');
+    const e = edits.filter(x => x.status === 'running' || x.status === 'queued').length;
+    $('nav-editing').textContent = e;
+    $('nav-editing').classList.toggle('hidden', !e);
+    $('nav-editing').title = `${e} edit${e === 1 ? '' : 's'} being made`;
   } catch { /* a missed tick is fine */ }
 }
 
@@ -532,6 +541,8 @@ function renderVideoHead(job) {
   $('dlcsv').href = `/api/jobs/${job.id}/export.csv`;
   const hasClips = ready > 0;
   ['dlzip', 'dlcsv', 'planposts'].forEach(id => $(id).classList.toggle('hidden', !hasClips));
+  $('makeedit').href = `#/edits/from/${job.id}`;
+  $('makeedit').classList.toggle('hidden', !(job.status === 'done' && hasClips && !(job.campaign && job.campaign.mode === 'overlay')));
   $('rerun').classList.toggle('hidden', !(job.status === 'done' && job.can_retry));
 }
 
@@ -2008,4 +2019,525 @@ $('logoinput').addEventListener('change', async (ev) => {
 });
 $('logoclear').addEventListener('click', async () => {
   await api('/api/brand/logo', { method: 'DELETE' }); setLogo(false); $('opt-logo').checked = false; toast('Logo removed');
+});
+
+/* =====================================================================
+   Edits — short music edits cut from your videos
+   ===================================================================== */
+const EM = { styles: [], effects: {}, grades: {}, lengths: [], flashes: {}, rights: '', sources: [], sounds: [],
+  picked: new Set(), style: 'velocity', sound: '', length: null, camps: [], list: [], listPoll: null, loaded: false };
+const EDIT_SAMPLES = {
+  velocity: '<div class="es es-velocity"><b>SEVEN<br>YEARS</b><i class="es-flash"></i></div>',
+  aura: '<div class="es es-aura"><span class="es-hook">bro was down to $500 and still…</span></div>',
+  flow: '<div class="es es-flow"><i></i><i></i><i></i></div>',
+  cinematic: '<div class="es es-cine"><span class="es-sub">the market pays patience</span></div>',
+  motivation: '<div class="es es-moti"><b><span>STICK</span> <span>TO</span> <span>THE</span> <span class="y">PLAN</span></b></div>',
+  funny: '<div class="es es-funny"><span class="es-meme">HIS FACE WHEN IT HIT 😭</span></div>',
+  money: '<div class="es es-money"><b>$2M</b><span>IN ONE YEAR</span></div>',
+};
+const EDIT_SHORT = {
+  velocity: 'Cuts on every beat, slow-mo and a glitch on the drop', aura: 'Slow-mo, dark and cold, a lore hook',
+  flow: 'Smooth cuts that carry the movement on', cinematic: 'Film look, his words, music under',
+  motivation: 'Black and white, his line word by word', funny: 'Punchlines back to back, meme text',
+  money: 'Warm gold, money lines on screen',
+};
+const THEME_EXAMPLES = ['his best trading advice', 'the funniest moments', 'money and wins', 'discipline and mindset'];
+const EDIT_STEPS = [
+  ['Pick the moments', /picking|matching|waiting|checking the words/i],
+  ['Fit it to the beat', /fitting|laying/i],
+  ['Render', /render/i],
+  ['Check', /checking it|done/i],
+];
+const styleOf = (id) => EM.styles.find(s => s.id === id) || EM.styles[0];
+const lenLabel = (s) => `${Math.round(s || 0)} s`;
+
+async function editsMeta() {
+  if (EM.loaded) return;
+  const st = await api('/api/edit-styles');
+  Object.assign(EM, { styles: st.styles, effects: st.effects, grades: st.grades, lengths: st.lengths,
+    flashes: st.flashes, rights: st.rights, loaded: true });
+}
+
+/* ---------- songs: one player for the page ---------- */
+function stopSong() {
+  const a = $('em-audio');
+  if (a && !a.paused) a.pause();
+  document.querySelectorAll('.song .play.on').forEach(b => b.classList.remove('on'));
+}
+function playSong(id, btn) {
+  const a = $('em-audio');
+  if (btn.classList.contains('on')) { stopSong(); return; }
+  stopSong();
+  a.src = `/media/sound/${id}`;
+  a.play().then(() => btn.classList.add('on')).catch(() => toast('Couldn’t play that song in the browser', true));
+  a.onended = () => btn.classList.remove('on');
+}
+function energyCurve(s, w = 150, h = 30) {
+  const e = s.energy || [];
+  if (!e.length) return '';
+  const step = w / Math.max(1, e.length - 1);
+  const pts = e.map((v, i) => `${(i * step).toFixed(1)},${(h - 2 - v * (h - 4)).toFixed(1)}`).join(' ');
+  const dx = s.duration ? (s.drop / s.duration) * w : -10;
+  return `<svg class="curve" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+    <polyline points="0,${h} ${pts} ${w},${h}" /><line x1="${dx.toFixed(1)}" x2="${dx.toFixed(1)}" y1="0" y2="${h}" /></svg>`;
+}
+
+/* ---------- make an edit ---------- */
+async function editsHome(fromJob) {
+  try { await editsMeta(); } catch (err) { toast(err.message, true); return; }
+  const [src, snd] = await Promise.all([api('/api/edit-sources').catch(() => ({ sources: [] })),
+    api('/api/sounds').catch(() => ({ sounds: [] }))]);
+  EM.sources = src.sources; EM.sounds = snd.sounds;
+  if (fromJob) EM.picked = new Set([fromJob]);
+  [...EM.picked].forEach(id => { if (!EM.sources.some(s => s.id === id)) EM.picked.delete(id); });
+  if (!EM.picked.size && EM.sources.length) EM.picked.add(EM.sources[0].id);
+  if (EM.sound && !EM.sounds.some(s => s.id === EM.sound)) EM.sound = '';
+  if (!EM.sound && EM.sounds.length && styleOf(EM.style).needs_music) EM.sound = EM.sounds[0].id;
+  $('em-rights').textContent = EM.rights;
+  renderEditSources(); renderEditStyles(); renderSongs(); renderEditLengths(); loadEditCamps();
+  loadEditList();
+}
+
+function renderEditSources() {
+  const box = $('em-sources');
+  if (!EM.sources.length) {
+    box.innerHTML = '<div class="empty"><b>No videos to cut from yet</b>Make clips from a video first — then it shows up here.<br><a class="btn" href="#/make">Make clips</a></div>';
+    return;
+  }
+  box.innerHTML = EM.sources.map(s => `<button type="button" class="foot ${EM.picked.has(s.id) ? 'on' : ''}" data-id="${s.id}" aria-pressed="${EM.picked.has(s.id)}">
+      <span class="tick" aria-hidden="true"></span>
+      <span class="fposter">${s.poster ? `<img src="${s.poster}" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>
+      <span class="ft">${esc(niceTitle(s))}</span>
+      <span class="fm">${s.duration ? mins(s.duration) : ''}${s.campaign_id ? ' · campaign' : ''}</span>
+    </button>`).join('');
+  box.querySelectorAll('.foot').forEach(b => b.addEventListener('click', () => {
+    const id = b.dataset.id;
+    if (EM.picked.has(id)) { if (EM.picked.size > 1) EM.picked.delete(id); else toast('Keep at least one video — the edit is cut from it'); }
+    else EM.picked.add(id);
+    renderEditSources();
+  }));
+}
+
+function renderEditStyles() {
+  $('em-styles').innerHTML = EM.styles.map(s => `<button type="button" class="look ${s.id === EM.style ? 'on' : ''}" data-style="${s.id}" aria-pressed="${s.id === EM.style}">
+      <span class="tick" aria-hidden="true"></span>
+      <div class="frame">${EDIT_SAMPLES[s.id] || ''}</div>
+      <div class="name">${esc(s.name)}</div><div class="sub">${esc(EDIT_SHORT[s.id] || s.what)}</div>
+    </button>`).join('');
+  $('em-styles').querySelectorAll('.look').forEach(b => b.addEventListener('click', () => {
+    EM.style = b.dataset.style;
+    const st = styleOf(EM.style);
+    if (st.needs_music && !EM.sound && EM.sounds.length) EM.sound = EM.sounds[0].id;
+    renderEditStyles(); renderSongs(); renderEditLengths(); loadEditCamps();
+  }));
+  const st = styleOf(EM.style);
+  $('em-style-hint').textContent = `${st.what} ` + (st.needs_music
+    ? `It’s cut to a song: the cuts land on its beats and the best moment on its drop. Music only — his voice is off (you can bring it back later).`
+    : 'His words play whole. A song underneath is optional — cuts still land on its beats.');
+}
+
+function renderSongs() {
+  const st = styleOf(EM.style);
+  const box = $('em-songs');
+  let html = EM.sounds.map(s => `<div class="song ${s.id === EM.sound ? 'on' : ''}" data-id="${s.id}" role="radio" tabindex="0" aria-checked="${s.id === EM.sound}">
+      <button type="button" class="play" aria-label="Play ${esc(s.name)}"></button>
+      <div class="s-main"><b>${esc(s.name)}</b><span>${s.bpm ? Math.round(s.bpm) + ' BPM · ' : ''}${fmt(s.duration)}${s.drop ? ` · drops at ${fmt(s.drop)}` : ''}</span></div>
+      ${energyCurve(s)}
+      <button type="button" class="x" title="Remove this song" aria-label="Remove ${esc(s.name)}">×</button>
+    </div>`).join('');
+  if (st.music_optional) html += `<div class="song none ${!EM.sound ? 'on' : ''}" data-id="" role="radio" tabindex="0" aria-checked="${!EM.sound}">
+      <span class="play off" aria-hidden="true"></span><div class="s-main"><b>No music</b><span>Just his voice</span></div></div>`;
+  if (!EM.sounds.length && st.needs_music) html = `<div class="empty"><b>${esc(st.name)} edits are cut to a song</b>Add a song you’re allowed to use — an MP3, or a video whose sound you want.<br><button type="button" class="btn" id="em-addsong2">Add a song</button></div>`;
+  box.innerHTML = html;
+  $('em-addsong2')?.addEventListener('click', () => $('em-songfile').click());
+  box.querySelectorAll('.song').forEach(row => {
+    const pick = () => { EM.sound = row.dataset.id; renderSongs(); };
+    row.addEventListener('click', ev => { if (!ev.target.closest('button')) pick(); });
+    row.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
+    row.querySelector('.play:not(.off)')?.addEventListener('click', ev => playSong(row.dataset.id, ev.currentTarget));
+    row.querySelector('.x')?.addEventListener('click', async () => {
+      const s = EM.sounds.find(x => x.id === row.dataset.id);
+      if (!confirm(`Remove “${s.name}” from your songs? Edits already made keep their sound.`)) return;
+      try {
+        await api(`/api/sounds/${s.id}`, { method: 'DELETE' });
+        EM.sounds = EM.sounds.filter(x => x.id !== s.id);
+        if (EM.sound === s.id) EM.sound = EM.sounds[0]?.id || '';
+        stopSong(); renderSongs();
+      } catch (err) { toast(err.message, true); }
+    });
+  });
+  if (st.needs_music && !EM.sound && EM.sounds.length) { EM.sound = EM.sounds[0].id; renderSongs(); }
+}
+$('em-addsong').addEventListener('click', () => $('em-songfile').click());
+$('em-songfile').addEventListener('change', async ev => {
+  const file = ev.target.files[0];
+  ev.target.value = '';
+  if (!file) return;
+  const done = busy($('em-addsong'), 'Reading the beats…');
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('name', file.name.replace(/\.[^.]+$/, ''));
+    const res = await fetch('/api/sounds', { method: 'POST', body: fd });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || 'Couldn’t add that song');
+    EM.sounds.unshift(body.sound);
+    EM.sound = body.sound.id;
+    renderSongs();
+    toast(`Added — ${Math.round(body.sound.bpm)} BPM, drops at ${fmt(body.sound.drop)}`);
+  } catch (err) { toast(err.message, true); }
+  finally { done(); }
+});
+
+function renderEditLengths() {
+  const best = styleOf(EM.style).length;
+  const on = EM.length || best;
+  $('em-lengths').innerHTML = EM.lengths.map(l => `<button type="button" class="chip ${l === on ? 'on' : ''}" data-l="${l}">${l} s${l === best ? ' · best' : ''}</button>`).join('');
+  $('em-lengths').querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => { EM.length = +c.dataset.l; renderEditLengths(); }));
+}
+fillExamples($('em-themes'), THEME_EXAMPLES, 'em-theme');
+
+async function loadEditCamps() {
+  try { EM.camps = (await api(`/api/edit-campaigns?style=${EM.style}`)).campaigns; } catch { EM.camps = []; }
+  const sel = $('em-campaign'), keep = sel.value;
+  fill(sel, [['', 'No campaign']].concat(EM.camps.map(c => [c.id, c.name])));
+  sel.value = EM.camps.some(c => c.id === keep) ? keep : '';
+  campNote();
+}
+function campNote() {
+  const c = EM.camps.find(x => x.id === $('em-campaign').value);
+  const note = $('em-camp-note');
+  note.classList.remove('warnnote');
+  if (!c) { note.textContent = ''; return; }
+  const st = styleOf(EM.style);
+  let text = c.refusal || '';
+  if (!text && !c.music && st.needs_music) text = `${c.name}: the brief doesn’t allow added music, so ${st.name} can’t be made for it. Pick Cinematic, Motivation or Funny with “No music” — or switch music on in the campaign’s rules if the brief allows it.`;
+  else if (!text) text = [c.music ? 'Music is allowed.' : 'No added music — pick “No music”.'].concat(c.notes).join(' ');
+  note.textContent = text;
+  note.classList.toggle('warnnote', !!(c.refusal || (!c.music && (st.needs_music || EM.sound))));
+}
+$('em-campaign').addEventListener('change', campNote);
+
+$('em-go').addEventListener('click', async () => {
+  if (!EM.picked.size) { toast('Pick at least one video to cut the edit from', true); return; }
+  const st = styleOf(EM.style);
+  if (st.needs_music && !EM.sound) { toast(`${st.name} edits are cut to a song — add or pick one first`, true); return; }
+  const done = busy($('em-go'), 'Starting…');
+  try {
+    const { id } = await post('/api/edits', {
+      style: EM.style, sources: [...EM.picked], sound: EM.sound, theme: $('em-theme').value.trim(),
+      length: EM.length || st.length, campaign_id: $('em-campaign').value,
+    });
+    $('em-theme').value = '';
+    location.hash = `#/edit/${id}`;
+  } catch (err) { toast(err.message, true); }
+  finally { done(); }
+});
+
+function ecard(e) {
+  const working = e.status === 'running' || e.status === 'queued';
+  const tag = working ? `<span class="tag accent">${/waiting/i.test(e.stage || '') ? 'Waiting' : `Making ${e.progress || 0}%`}</span>`
+    : e.status === 'failed' ? '<span class="tag bad">Didn’t work</span>'
+    : e.verdict === 'blocked' ? '<span class="tag bad">Blocked</span>' : e.verdict === 'check' ? '<span class="tag warn">Check first</span>'
+    : '<span class="tag good">Ready</span>';
+  return `<a class="vcard" href="#/edit/${e.id}">
+    <div class="poster">${e.thumb_url ? `<img src="${e.thumb_url}" alt="" loading="lazy">` : working ? '<span class="spin"></span>' : PH_ICON}</div>
+    <div>
+      <div class="t" title="${esc(e.title)}">${esc(e.title)}</div>
+      <div class="facts">${tag}<span class="tag">${esc(e.style_name)}</span>${e.length ? `<span class="tag">${lenLabel(e.length)}</span>` : ''}</div>
+      ${working ? `<div class="mini-bar"><i style="width:${e.progress || 0}%"></i></div>` : ''}
+      ${e.status === 'failed' && e.error ? `<div class="why">${esc(e.error)}</div>` : `<div class="when">${ago(e.created_at)}</div>`}
+    </div></a>`;
+}
+async function loadEditList() {
+  const render = () => {
+    $('em-list').innerHTML = EM.list.length ? EM.list.map(ecard).join('')
+      : '<div class="empty"><b>No edits yet</b>Pick a video, a style and a song above, then press Make edit.</div>';
+  };
+  try { EM.list = (await api('/api/edits')).edits; } catch { EM.list = []; }
+  render();
+  clearInterval(EM.listPoll);
+  if (EM.list.some(e => e.status === 'running' || e.status === 'queued'))
+    EM.listPoll = setInterval(async () => {
+      try { EM.list = (await api('/api/edits')).edits; } catch { return; }
+      render();
+      if (!EM.list.some(e => e.status === 'running' || e.status === 'queued')) { clearInterval(EM.listPoll); refreshWorking(); }
+    }, 4000);
+}
+
+/* ---------- one edit ---------- */
+let EE = { id: null, edit: null, poll: null, draft: {}, moments: null, video: '' };
+const EDIT_ASK_EXAMPLES = ['Faster', 'More flashes', 'Black and white', 'Put the line about … on the drop',
+  'Use a different song', 'Hook about …'];
+fillExamples($('ee-ask-examples'), EDIT_ASK_EXAMPLES, 'ee-ask-text');
+
+async function openEdit(id) {
+  clearInterval(EE.poll);
+  EE = { id, edit: null, poll: null, draft: {}, moments: null, video: '' };
+  $('ee-title').textContent = 'Loading…'; $('ee-sub').innerHTML = ''; $('ee-notes').innerHTML = '';
+  $('ee-video').removeAttribute('src'); $('ee-video').load(); $('ee-empty').classList.remove('hidden');
+  $('ee-ask-log').innerHTML = ''; $('ee-versions-pick').classList.add('hidden');
+  try {
+    await editsMeta();
+    EM.sounds = (await api('/api/sounds')).sounds;
+  } catch (err) { toast(err.message, true); }
+  await tickEdit();
+  EE.poll = setInterval(tickEdit, 2000);
+}
+const editWorking = (e) => e && (e.status === 'running' || e.status === 'queued');
+async function tickEdit() {
+  let e;
+  try { e = await api(`/api/edits/${EE.id}`); }
+  catch (err) {
+    clearInterval(EE.poll); EE.poll = null;
+    $('ee-title').textContent = 'Edit not found';
+    $('ee-sub').innerHTML = `<span class="hint">${esc(err.message)}</span>`;
+    return;
+  }
+  if (location.hash !== `#/edit/${EE.id}`) { clearInterval(EE.poll); return; }
+  const fresh = !EE.edit || EE.edit.status !== e.status;     // first load, or it just finished
+  EE.edit = e;
+  const has = e.moments.length > 0;                 // nothing to change until the moments are picked
+  $('ee-ask').classList.toggle('hidden', !has);
+  document.querySelectorAll('.ee-card').forEach(c => c.classList.toggle('hidden', !has));
+  renderEditHead(e); renderEditProgress(e); renderEditPreview(e); renderEditAsks(e);
+  if (!Object.keys(EE.draft).length && (fresh || !EE.moments)) renderEditControls(e);
+  if (!editWorking(e)) { clearInterval(EE.poll); EE.poll = null; refreshWorking(); }
+}
+function watchEdit() { clearInterval(EE.poll); tickEdit(); EE.poll = setInterval(tickEdit, 2000); }
+
+function renderEditHead(e) {
+  $('ee-title').textContent = e.title || 'Edit';
+  document.title = `${e.title || 'Edit'} — ClipAgent`;
+  const tags = [`<span class="tag accent">${esc(e.style_name)}</span>`];
+  if (e.length) tags.push(`<span class="tag">${lenLabel(e.length)}</span>`);
+  tags.push(e.sound ? `<span class="tag">♪ ${esc(e.sound.name)}${e.sound.bpm ? ` · ${Math.round(e.sound.bpm)} BPM` : ''}</span>` : '<span class="tag">No music</span>');
+  if (e.moments.length) tags.push(`<span class="tag">${e.moments.filter(m => !m.off).length} moments</span>`);
+  const camp = (EM.camps || []).find(c => c.id === e.campaign_id);
+  if (e.campaign_id) tags.push(`<a class="tag info" href="#/campaign/${e.campaign_id}">${esc(camp ? camp.name : 'Campaign')}</a>`);
+  if (e.created_at) tags.push(`<span class="tag">${ago(e.created_at)}</span>`);
+  $('ee-sub').innerHTML = tags.join('');
+}
+
+function renderEditProgress(e) {
+  const box = $('ee-progress');
+  const working = editWorking(e), failed = e.status === 'failed';
+  box.classList.toggle('hidden', !working && !failed);
+  box.classList.toggle('failed', failed);
+  if (!working && !failed) return;
+  let at = EDIT_STEPS.findIndex(([, re]) => re.test(e.stage || ''));
+  if (at < 0) at = failed ? 0 : 0;
+  $('ee-steps').innerHTML = EDIT_STEPS.map(([label], i) => {
+    const cls = failed && i === at ? 'fail' : i < at ? 'done' : i === at ? (failed ? 'fail' : 'on') : '';
+    return `<span class="s ${cls}"><i></i>${label}</span>`;
+  }).join('');
+  $('ee-bar').style.width = `${failed ? 100 : e.progress || 0}%`;
+  $('ee-stage').textContent = failed ? (e.error || 'It didn’t work.') + (e.video_url ? ' The version before is still below.' : '') : (e.stage || 'Working…');
+  $('ee-pct').textContent = failed ? '' : `${e.progress || 0}%`;
+  $('ee-retry').classList.toggle('hidden', !failed);
+  $('ee-retry').textContent = e.moments.length ? 'Try again — your moments are kept' : 'Try again';
+}
+$('ee-retry').addEventListener('click', () => remakeEdit({}, $('ee-retry')));
+
+const CHECKS_HTML = (g) => `<ul class="checks">${(g.checks || []).map(c =>
+  `<li class="${c.status}"><span class="ic">${CHECK_ICON[c.status] || '–'}</span><span><b>${esc(c.label)}</b> ${esc(c.detail || '')}</span></li>`).join('')}</ul>`;
+function renderEditPreview(e) {
+  const v = $('ee-video');
+  if (e.video_url && EE.video !== e.video_url) { EE.video = e.video_url; v.src = e.video_url; v.poster = e.thumb_url || ''; }
+  $('ee-empty').classList.toggle('hidden', !!e.video_url);
+  $('ee-empty').querySelector('span:last-child').textContent = e.status === 'failed' ? 'No video yet' : 'Making your edit…';
+  const g = e.compliance;
+  $('ee-gate').innerHTML = g ? `<div class="panel-block ee-gate"><div class="kit-summary ${g.status}">${esc(GATE_LABEL[g.status] || g.status)} — ${esc((g.summary || '').replace(/^(Blocked|Check before posting):\s*/, ''))}</div>${CHECKS_HTML(g)}</div>` : '';
+  const blocked = g && g.status === 'blocked';
+  $('ee-download').disabled = !e.video_url || blocked;
+  $('ee-download').title = blocked ? 'Blocked by the campaign check — see why above' : '';
+  $('ee-anyway').classList.toggle('hidden', !blocked);
+  $('ee-copy').disabled = !e.post_text;
+  $('ee-undo').classList.toggle('hidden', !(e.can_undo && !editWorking(e)));
+  $('ee-notes').innerHTML = (e.notes || []).map(n => `<li>${esc(n)}</li>`).join('');
+}
+$('ee-download').addEventListener('click', () => { location.href = `/api/edits/${EE.id}/download`; });
+$('ee-anyway').addEventListener('click', () => {
+  if (confirm('This edit breaks the campaign’s brief, so it will likely be rejected. Download it anyway?'))
+    location.href = `/api/edits/${EE.id}/download?anyway=1`;
+});
+$('ee-copy').addEventListener('click', () => EE.edit && copyText(EE.edit.post_text, 'Caption and hashtags copied'));
+$('ee-undo').addEventListener('click', async () => {
+  try { await post(`/api/edits/${EE.id}/undo`, {}); toast('Put back the version from before'); EE.draft = {}; EE.moments = null; EE.video = ''; watchEdit(); }
+  catch (err) { toast(err.message, true); }
+});
+
+/* the controls: changes collect in EE.draft until Re-make */
+function draftChanged() {
+  const n = Object.keys(EE.draft).length;
+  $('ee-dirty').textContent = n ? 'You’ve changed things — press Re-make to see them (no new moments are picked).' : '';
+  $('ee-dirty').classList.toggle('dirty', !!n);
+}
+const val = (k, fallback) => (k in EE.draft ? EE.draft[k] : fallback);
+function segSet(id, v) { document.querySelectorAll(`#${id} button`).forEach(b => { b.classList.toggle('on', b.dataset.v === v); b.setAttribute('aria-checked', b.dataset.v === v); }); }
+
+function renderEditControls(e) {
+  const style = val('style', e.style), st = styleOf(style);
+  $('ee-styles').innerHTML = EM.styles.map(s => `<button type="button" class="chip ${s.id === style ? 'on' : ''}" data-s="${s.id}" title="${esc(s.what)}">${esc(s.name)}</button>`).join('');
+  $('ee-styles').querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
+    EE.draft.style = c.dataset.s;
+    const ns = styleOf(c.dataset.s);
+    if (ns.needs_music && !val('sound', e.settings.sound) && EM.sounds.length) EE.draft.sound = EM.sounds[0].id;
+    renderEditControls(e); draftChanged();
+  }));
+  const sound = val('sound', e.settings.sound || '');
+  const songOpts = EM.sounds.map(s => [s.id, `${s.name}${s.bpm ? ` · ${Math.round(s.bpm)} BPM` : ''}`]);
+  fill($('ee-song'), (st.music_optional || !EM.sounds.length ? [['', 'No music']] : []).concat(songOpts));
+  $('ee-song').value = sound;
+  fill($('ee-grade'), Object.entries(EM.grades));
+  $('ee-grade').value = val('grade', e.grade);
+  const len = val('length', e.settings.length);
+  $('ee-lengths').innerHTML = EM.lengths.map(l => `<button type="button" class="chip ${l === len ? 'on' : ''}" data-l="${l}">${l} s</button>`).join('');
+  $('ee-lengths').querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => { EE.draft.length = +c.dataset.l; renderEditControls(e); draftChanged(); }));
+  $('ee-pacewrap').classList.toggle('hidden', st.pace !== 'beat');
+  segSet('ee-pace', val('pace', e.pace)); segSet('ee-flashes', val('flashes', e.flashes));
+  const fx = { ...e.effects, ...(EE.draft.effects || {}) };
+  $('ee-effects').innerHTML = Object.entries(EM.effects).map(([k, label]) =>
+    `<label class="toggle small"><input type="checkbox" data-fx="${k}" ${fx[k] ? 'checked' : ''}><span>${esc(label)}</span></label>`).join('');
+  $('ee-effects').querySelectorAll('input').forEach(i => i.addEventListener('change', () => {
+    EE.draft.effects = { ...(EE.draft.effects || {}), [i.dataset.fx]: i.checked }; draftChanged();
+  }));
+  const pct = (v) => +v ? `${Math.round(v * 100)}%` : 'Off';
+  $('ee-voice').value = val('voice', e.voice); $('ee-voiceval').textContent = pct($('ee-voice').value);
+  $('ee-music').value = val('music', e.music); $('ee-musicval').textContent = pct($('ee-music').value);
+  $('ee-music').disabled = !sound;
+  $('ee-hook').value = val('hook', e.hook);
+  $('ee-caption').value = e.caption || '';
+  $('ee-tags').value = (e.hashtags || []).join(' ');
+  $('ee-posthint').textContent = e.campaign_id ? 'The campaign’s own lines and hashtags are kept.' : '';
+  $('ee-checklist').innerHTML = (e.checklist || []).map(s => `<li>${esc(s)}</li>`).join('');
+  if (!EE.moments) EE.moments = e.moments.map(m => ({ ...m }));
+  renderMoments(st);
+  draftChanged();
+}
+['ee-pace', 'ee-flashes'].forEach(id => document.querySelectorAll(`#${id} button`).forEach(b => b.addEventListener('click', () => {
+  EE.draft[id === 'ee-pace' ? 'pace' : 'flashes'] = b.dataset.v; segSet(id, b.dataset.v); draftChanged();
+})));
+$('ee-song').addEventListener('change', () => { EE.draft.sound = $('ee-song').value; $('ee-music').disabled = !EE.draft.sound; draftChanged(); });
+$('ee-grade').addEventListener('change', () => { EE.draft.grade = $('ee-grade').value; draftChanged(); });
+['voice', 'music'].forEach(k => $(`ee-${k}`).addEventListener('input', () => {
+  EE.draft[k] = +$(`ee-${k}`).value;
+  $(`ee-${k}val`).textContent = +$(`ee-${k}`).value ? `${Math.round($(`ee-${k}`).value * 100)}%` : 'Off';
+  draftChanged();
+}));
+$('ee-hook').addEventListener('input', () => { EE.draft.hook = $('ee-hook').value; draftChanged(); });
+
+function renderMoments(st) {
+  const shown = st.text === 'punch' || st.text === 'quote' || st.text === 'meme';
+  const list = EE.moments || [];
+  $('ee-mcount').textContent = list.length ? `(${list.filter(m => !m.off).length} of ${list.length} on)` : '';
+  $('ee-moments').innerHTML = list.map((m, i) => `<div class="mrow ${m.off ? 'off' : ''} ${m.drop ? 'drop' : ''}" data-i="${i}">
+      <img class="mthumb" src="${m.thumb}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">
+      <div class="mmain">
+        <input class="mtext" type="text" maxlength="160" value="${esc(m.text || '')}" placeholder="${shown ? 'No words on screen' : 'Words aren’t shown in this style'}" aria-label="Words on screen for this moment">
+        <div class="mmeta">${m.drop ? '<b>On the drop</b> · ' : ''}${m.length} s at ${fmt(m.start)} · ${esc(m.source_title || '')}</div>
+      </div>
+      <div class="mctl">
+        <button type="button" class="btn ghost small mdrop" ${m.drop ? 'disabled' : ''} title="Land this moment on the song’s drop">${m.drop ? 'On the drop' : 'Put on drop'}</button>
+        <label class="toggle small"><input type="checkbox" class="mon" ${m.off ? '' : 'checked'}><span>On</span></label>
+        <button type="button" class="btn ghost small mup" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button>
+        <button type="button" class="btn ghost small mdown" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button>
+      </div></div>`).join('');
+  const changed = () => { EE.draft.moments = EE.moments.map(m => ({ id: m.id, text: m.text || '', off: !!m.off, drop: !!m.drop })); draftChanged(); };
+  $('ee-moments').querySelectorAll('.mrow').forEach(row => {
+    const i = +row.dataset.i, m = EE.moments[i];
+    row.querySelector('.mtext').addEventListener('input', ev => { m.text = ev.target.value; changed(); });
+    row.querySelector('.mon').addEventListener('change', ev => {
+      if (!ev.target.checked && EE.moments.filter(x => !x.off).length <= 1) { ev.target.checked = true; toast('Keep at least one moment on'); return; }
+      m.off = !ev.target.checked; changed(); renderMoments(st);
+    });
+    row.querySelector('.mdrop').addEventListener('click', () => { EE.moments.forEach(x => { x.drop = x === m; }); m.off = false; changed(); renderMoments(st); });
+    const move = (d) => { const j = i + d; [EE.moments[i], EE.moments[j]] = [EE.moments[j], EE.moments[i]]; changed(); renderMoments(st); };
+    row.querySelector('.mup').addEventListener('click', () => move(-1));
+    row.querySelector('.mdown').addEventListener('click', () => move(1));
+  });
+}
+
+async function remakeEdit(changes, btn) {
+  const done = busy(btn, 'Starting…');
+  try {
+    await post(`/api/edits/${EE.id}/remake`, changes);
+    EE.draft = {}; EE.moments = null; draftChanged();
+    toast(changes.repick ? 'Picking new moments — the old version stays until the new one is ready' : 'Re-making it — Undo puts this version back');
+    watchEdit();
+  } catch (err) { toast(err.message, true); }
+  finally { done(); }
+}
+$('ee-remake').addEventListener('click', () => {
+  if (!Object.keys(EE.draft).length) { toast('Change something first — or press New moments for a fresh pick'); return; }
+  remakeEdit({ ...EE.draft }, $('ee-remake'));
+});
+$('ee-repick').addEventListener('click', () => remakeEdit({ ...EE.draft, repick: true }, $('ee-repick')));
+
+$('ee-versions').addEventListener('click', () => {
+  const e = EE.edit; if (!e) return;
+  const box = $('ee-versions-pick');
+  if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; }
+  const others = EM.sounds.filter(s => s.id !== e.settings.sound);
+  const st = styleOf(e.style);
+  if (!others.length && !(st.music_optional && e.settings.sound)) { toast('Add another song first — on the Edits page'); return; }
+  box.innerHTML = '<div class="hint">Same moments and words, cut to each song you tick — post them and see which one wins.</div>'
+    + others.map(s => `<label class="toggle small"><input type="checkbox" value="${s.id}" checked><span>${esc(s.name)}${s.bpm ? ` · ${Math.round(s.bpm)} BPM` : ''}</span></label>`).join('')
+    + (st.music_optional && e.settings.sound ? '<label class="toggle small"><input type="checkbox" value=""><span>No music</span></label>' : '')
+    + '<div class="btnrow"><button type="button" class="btn small" id="ee-versions-go">Make them</button></div>';
+  box.classList.remove('hidden');
+  $('ee-versions-go').addEventListener('click', async () => {
+    const ids = [...box.querySelectorAll('input:checked')].map(i => i.value);
+    if (!ids.length) { toast('Tick at least one song', true); return; }
+    const done = busy($('ee-versions-go'), 'Starting…');
+    try {
+      const out = await post(`/api/edits/${EE.id}/versions`, { sounds: ids });
+      toast(`Making ${out.ids.length} version${out.ids.length > 1 ? 's' : ''} — they show up in Your edits`);
+      box.classList.add('hidden');
+      location.hash = '#/edits';
+    } catch (err) { toast(err.message, true); }
+    finally { done(); }
+  });
+});
+
+/* typed changes */
+function renderEditAsks(e) {
+  const asks = (e.asks || []).slice().reverse();
+  $('ee-ask-log').innerHTML = asks.slice(0, 3).map(a => `<div class="ask-item"><div class="you">${esc(a.text)}</div><div class="ca">
+      ${a.question ? `<p class="q">${esc(a.question)}</p>` : ''}${a.understood ? `<p>${esc(a.understood)}</p>` : ''}
+      ${(a.cant || []).map(c => `<p class="cant">${esc(c)}</p>`).join('')}
+      ${a.changed ? `<p class="hint">${editWorking(e) ? '<span class="spin"></span> Making it…' : 'Done — Undo puts the version before back.'}</p>` : ''}
+    </div></div>`).join('');
+}
+async function askEdit() {
+  const text = $('ee-ask-text').value.trim();
+  if (!text) { toast('Type what you’d like changed', true); $('ee-ask-text').focus(); return; }
+  if (Object.keys(EE.draft).length && !confirm('You have changes you haven’t re-made yet. Drop them and do this instead?')) return;
+  const done = busy($('ee-ask-go'), 'Reading…');
+  try {
+    const out = await post(`/api/edits/${EE.id}/ask`, { text });
+    $('ee-ask-text').value = '';
+    EE.draft = {}; EE.moments = null;
+    if (out.reply.question) toast('ClipAgent has a question — see below');
+    EE.edit = null;
+    watchEdit();
+  } catch (err) { toast(err.message, true); }
+  finally { done(); }
+}
+$('ee-ask-go').addEventListener('click', askEdit);
+$('ee-ask-text').addEventListener('keydown', ev => { if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) askEdit(); });
+$('ee-ask-text').addEventListener('input', () => autoGrow($('ee-ask-text')));
+
+$('ee-savepost').addEventListener('click', async () => {
+  const done = busy($('ee-savepost'), 'Saving…');
+  try {
+    const e = await post(`/api/edits/${EE.id}/post`, { caption: $('ee-caption').value, hashtags: $('ee-tags').value.split(/[\s,]+/).filter(Boolean) });
+    EE.edit = e; renderEditPreview(e); toast('Caption saved');
+  } catch (err) { toast(err.message, true); }
+  finally { done(); }
+});
+$('ee-delete').addEventListener('click', async () => {
+  if (!confirm('Delete this edit and its video? Your footage and songs stay.')) return;
+  try { await api(`/api/edits/${EE.id}`, { method: 'DELETE' }); toast('Edit deleted'); location.hash = '#/edits'; }
+  catch (err) { toast(err.message, true); }
 });

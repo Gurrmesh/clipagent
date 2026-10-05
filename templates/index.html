@@ -28,11 +28,12 @@
     <span class="brand-name">ClipAgent</span>
   </a>
   <nav class="nav" aria-label="Main">
-    <a href="#/make" data-route="make"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Make clips</a>
-    <a href="#/videos" data-route="videos"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M10 9.5v5l4.5-2.5z"/></svg>My videos<span class="nav-badge hidden" id="nav-working"></span></a>
-    <a href="#/campaigns" data-route="campaigns"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4l11 4V6L4 10z"/><path d="M15 9.5a3 3 0 0 1 0 5"/><path d="M7 14.5 8.2 19"/></svg>Campaigns</a>
-    <a href="#/money" data-route="money"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18 9.5 12l4 3.5L20 8"/><path d="M15 8h5v5"/></svg>Money</a>
-    <a href="#/settings" data-route="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M5.6 18.4l1.6-1.6M16.8 7.2l1.6-1.6"/></svg>Settings</a>
+    <a href="#/make" data-route="make"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span class="nl">Make clips</span><span class="ns">Make</span></a>
+    <a href="#/videos" data-route="videos"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M10 9.5v5l4.5-2.5z"/></svg><span class="nl">My videos</span><span class="ns">Videos</span><span class="nav-badge hidden" id="nav-working"></span></a>
+    <a href="#/edits" data-route="edits"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 17.5V6l10-2v11.5"/><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="16.5" cy="15.5" r="2.5"/></svg><span class="nl">Edits</span><span class="ns">Edits</span><span class="nav-badge hidden" id="nav-editing"></span></a>
+    <a href="#/campaigns" data-route="campaigns"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4l11 4V6L4 10z"/><path d="M15 9.5a3 3 0 0 1 0 5"/><path d="M7 14.5 8.2 19"/></svg><span class="nl">Campaigns</span><span class="ns">Campaigns</span></a>
+    <a href="#/money" data-route="money"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18 9.5 12l4 3.5L20 8"/><path d="M15 8h5v5"/></svg><span class="nl">Money</span><span class="ns">Money</span></a>
+    <a href="#/settings" data-route="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M5.6 18.4l1.6-1.6M16.8 7.2l1.6-1.6"/></svg><span class="nl">Settings</span><span class="ns">Settings</span></a>
   </nav>
   <div class="side-foot">
     <div id="side-status" class="side-status"></div>
@@ -171,6 +172,7 @@
         <div class="meta" id="job-sub"></div>
       </div>
       <div class="vh-actions">
+        <a id="makeedit" class="btn ghost small hidden" href="#" title="Cut a music edit from this video's best moments">Make an edit</a>
         <button id="planposts" class="btn ghost small" type="button" title="Spread these clips over your accounts, 2–3 a day, with Telegram reminders">Plan posts</button>
         <a id="dlzip" class="btn ghost small" href="#">Download all</a>
         <button id="rerun" class="btn ghost small" type="button" title="Pick and make the clips again from this video — no new download">Run again</button>
@@ -212,6 +214,189 @@
       <label class="toggle small" id="alts-wrap"><input id="show-alts" type="checkbox"><span>Show second versions</span></label>
     </div>
     <div id="grid" class="grid"></div>
+  </section>
+
+  <!-- ============ EDITS: make an edit ============ -->
+  <section class="page hidden" id="page-edits">
+    <header class="page-head">
+      <h1>Edits</h1>
+      <p class="lede">Short music edits cut from your videos: every cut on the beat, the best line on the drop, a hook in the first seconds and an ending that loops.</p>
+    </header>
+
+    <div class="maker" id="ed-maker">
+      <div class="step">
+        <div class="step-n" aria-hidden="true">1</div>
+        <div class="step-body">
+          <div class="step-title">Footage</div>
+          <div id="em-sources" class="foot-grid"></div>
+          <div class="hint">Add a video in <a href="#/make">Make clips</a> first — ClipAgent reuses its words, no new download.</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n" aria-hidden="true">2</div>
+        <div class="step-body">
+          <div class="step-title">Style</div>
+          <div id="em-styles" class="look-row edit-styles"></div>
+          <div class="hint" id="em-style-hint"></div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n" aria-hidden="true">3</div>
+        <div class="step-body">
+          <div class="row-line">
+            <div class="step-title">Song</div>
+            <button id="em-addsong" type="button" class="btn ghost small">Add a song</button>
+          </div>
+          <input id="em-songfile" type="file" accept="audio/*,video/*,.mp3,.m4a,.wav,.aac,.ogg,.flac,.mp4,.mov" class="hidden">
+          <div id="em-songs" class="songs"></div>
+          <div class="hint" id="em-rights"></div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-n" aria-hidden="true">4</div>
+        <div class="step-body">
+          <div class="step-title">What's it about? <span class="muted">(optional)</span></div>
+          <input id="em-theme" type="text" maxlength="300" placeholder="e.g. his best trading advice, the funniest moments, money and wins">
+          <div class="ask-examples" id="em-themes"></div>
+          <div class="field"><label>Length</label><div id="em-lengths" class="chips small-chips"></div></div>
+          <div class="more-grid em-campgrid">
+            <div class="field"><label for="em-campaign">For a campaign</label>
+              <select id="em-campaign"><option value="">No campaign</option></select>
+              <div class="hint" id="em-camp-note"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="maker-go">
+        <button id="em-go" class="btn big" type="button">Make edit</button>
+        <span class="hint" id="em-go-hint">About a minute or two. It comes to Telegram too when it's set up.</span>
+      </div>
+    </div>
+
+    <section class="recent">
+      <div class="section-head"><h2>Your edits</h2></div>
+      <div id="em-list" class="video-list compact"></div>
+    </section>
+    <audio id="em-audio" preload="none"></audio>
+  </section>
+
+  <!-- ============ ONE EDIT ============ -->
+  <section class="page hidden" id="page-edit">
+    <a href="#/edits" class="back">Edits</a>
+    <header class="video-head">
+      <div class="vh-text">
+        <h1 id="ee-title">Edit</h1>
+        <div class="meta" id="ee-sub"></div>
+      </div>
+    </header>
+
+    <div id="ee-progress" class="progress hidden">
+      <div class="steps" id="ee-steps"></div>
+      <div class="bar"><i id="ee-bar"></i></div>
+      <div class="progress-foot"><span id="ee-stage">Starting…</span><span id="ee-pct"></span></div>
+      <button id="ee-retry" class="btn small hidden" type="button">Try again — your moments are kept</button>
+    </div>
+
+    <div class="ee-layout">
+      <div class="ee-preview">
+        <div class="ee-frame"><video id="ee-video" controls playsinline loop preload="metadata"></video>
+          <div id="ee-empty" class="ee-empty"><span class="spin"></span><span>Making your edit…</span></div></div>
+        <div id="ee-gate"></div>
+        <div class="btnrow ee-actions">
+          <button id="ee-download" type="button" class="btn">Download</button>
+          <button id="ee-copy" type="button" class="btn ghost">Copy caption</button>
+          <button id="ee-undo" type="button" class="btn ghost hidden" title="Put back the version from before the last change">Undo</button>
+          <button id="ee-anyway" type="button" class="btn ghost hidden" title="It breaks the brief, so it will likely be rejected">Download anyway</button>
+        </div>
+        <ul id="ee-notes" class="ee-notes"></ul>
+      </div>
+
+      <div class="ee-controls">
+        <section class="ask" id="ee-ask">
+          <div class="ask-head">
+            <span class="ask-mark" aria-hidden="true"></span>
+            <div><h2>Tell ClipAgent what to change</h2>
+              <p class="hint">Say it the way you'd tell an editor.</p></div>
+          </div>
+          <div class="ask-box">
+            <textarea id="ee-ask-text" rows="2" spellcheck="true" placeholder="e.g. Faster, more flashes, and put the $20M line on the drop."></textarea>
+            <button id="ee-ask-go" class="btn" type="button">Change it</button>
+          </div>
+          <div class="ask-examples" id="ee-ask-examples"></div>
+          <div id="ee-ask-log" class="ask-log"></div>
+        </section>
+
+        <div class="card ee-card">
+          <div class="row-line ee-cardhead">
+            <h2>Change it by hand</h2>
+            <div class="btnrow">
+              <button id="ee-remake" type="button" class="btn">Re-make</button>
+              <button id="ee-repick" type="button" class="btn ghost" title="Claude picks new moments from the same videos">New moments</button>
+            </div>
+          </div>
+          <div class="hint" id="ee-dirty"></div>
+
+          <h4>Style</h4>
+          <div id="ee-styles" class="chips"></div>
+
+          <div class="more-grid">
+            <div class="field"><label for="ee-song">Song</label><select id="ee-song"></select></div>
+            <div class="field"><label for="ee-grade">Colour look</label><select id="ee-grade"></select></div>
+          </div>
+          <button id="ee-versions" type="button" class="btn ghost small" title="The same edit cut to your other songs, to test which one does better">Make versions with my other songs</button>
+          <div id="ee-versions-pick" class="versions hidden"></div>
+
+          <h4>Length</h4>
+          <div id="ee-lengths" class="chips small-chips"></div>
+
+          <div id="ee-pacewrap">
+            <h4>How fast it cuts</h4>
+            <div class="seg" id="ee-pace" role="radiogroup" aria-label="How fast it cuts">
+              <button type="button" data-v="slower" role="radio">Slower</button>
+              <button type="button" data-v="normal" role="radio">Normal</button>
+              <button type="button" data-v="faster" role="radio">Faster</button>
+            </div>
+          </div>
+
+          <h4>Flashes</h4>
+          <div class="seg" id="ee-flashes" role="radiogroup" aria-label="Flashes">
+            <button type="button" data-v="few" role="radio">Only on the drop</button>
+            <button type="button" data-v="normal" role="radio">As the style does</button>
+            <button type="button" data-v="many" role="radio">On every cut</button>
+          </div>
+
+          <h4>Effects</h4>
+          <div id="ee-effects" class="fx-grid"></div>
+
+          <div class="more-grid">
+            <div class="field"><label for="ee-voice">His voice <span class="val" id="ee-voiceval"></span></label>
+              <input id="ee-voice" type="range" min="0" max="1.5" step="0.05"></div>
+            <div class="field"><label for="ee-music">Music <span class="val" id="ee-musicval"></span></label>
+              <input id="ee-music" type="range" min="0" max="1.5" step="0.05"></div>
+          </div>
+
+          <h4>Hook — the first 3 seconds</h4>
+          <input id="ee-hook" type="text" maxlength="90" placeholder="Lore or a claim, from what he says">
+
+          <h4>Moments <span class="muted" id="ee-mcount"></span></h4>
+          <div class="hint">The one marked <b>On the drop</b> lands where the song hits. Switch moments off, move them up or down, or change their words.</div>
+          <div id="ee-moments" class="moments"></div>
+        </div>
+
+        <div class="card ee-card">
+          <h2>Caption to post</h2>
+          <textarea id="ee-caption" rows="3" placeholder="The caption you'll paste when posting."></textarea>
+          <div class="field"><label for="ee-tags">Hashtags</label><input id="ee-tags" type="text" placeholder="trading money mindset"></div>
+          <div class="btnrow"><button id="ee-savepost" type="button" class="btn ghost small">Save caption</button>
+            <span class="hint" id="ee-posthint"></span></div>
+          <ul id="ee-checklist" class="steps-list"></ul>
+          <div class="btnrow"><button id="ee-delete" type="button" class="btn ghost small danger">Delete this edit</button></div>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- ============ CAMPAIGNS ============ -->
