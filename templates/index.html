@@ -346,6 +346,12 @@
             <div class="field"><label for="ee-song">Song</label><select id="ee-song"></select></div>
             <div class="field"><label for="ee-grade">Colour look</label><select id="ee-grade"></select></div>
           </div>
+          <div id="ee-partwrap" class="field ee-part hidden">
+            <label>Part of the song <span class="val" id="ee-partval"></span></label>
+            <div id="ee-part" class="part-curve" role="slider" tabindex="0" aria-label="Where the edit starts in the song"></div>
+            <div class="inline"><span class="hint" id="ee-parthint">Click where the edit should start — it snaps to the nearest bar.</span>
+              <button id="ee-partauto" class="btn ghost small" type="button">Auto</button></div>
+          </div>
           <button id="ee-versions" type="button" class="btn ghost small" title="The same edit cut to your other songs, to test which one does better">Make versions with my other songs</button>
           <div id="ee-versions-pick" class="versions hidden"></div>
 

@@ -70,9 +70,17 @@ bars = TMP / "bars.mp4"                       # moving colour bars, a voice-like
 ff("-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=40", "-f", "lavfi", "-i",
    "sine=f=220:d=40:sample_rate=48000", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-c:a", "aac",
    "-shortest", str(bars))
-steps = TMP / "steps.mp4"                     # grey level = 16 + 6 × (the source's whole second)
-ff("-f", "lavfi", "-i", "color=c=gray:s=640x360:r=30:d=40", "-vf", "geq=lum='16+6*floor(T)':cb=128:cr=128",
+steps = TMP / "steps.mp4"                     # a white bar that moves down 10 px every second of the source
+ff("-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=30",
+   "-vf", "geq=lum='if(between(Y\\,10*floor(T)+10\\,10*floor(T)+16)\\,235\\,16)':cb=128:cr=128",
    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "8", "-g", "15", str(steps))
+
+
+def bar_second(img):
+    """Which whole second of the source a frame shows: where its white bar sits (colour can't move it)."""
+    rows = img[:, 400:680, 1].astype(np.float32).mean(axis=1)
+    y = float(np.argmax(rows)) / (1920 / 360)            # back to source pixels
+    return int(round((y - 13) / 10))
 song = {"id": "s1", "file": str(song_path), "analysis": beats.analyze(song_path)}
 print(f"  song: {song['analysis']['bpm']} BPM, drop at {song['analysis']['drop']} s")
 
@@ -120,9 +128,9 @@ expect(info["frames"] == int(round(tl["length"] * 30)), "every frame written")
 # --- the right footage at the right moment ---------------------------------------------------
 print("== frames come from the right place in the footage")
 off = {k: False for k in edits.EFFECTS}
-grey_ms = [{"id": f"g{i}", "source": "S", "start": 2.2 + i * 7, "end": 5.6 + i * 7, "hit": 3.5 + i * 7, "text": "",
+grey_ms = [{"id": f"g{i}", "source": "S", "start": 2.2 + i * 5, "end": 5.6 + i * 5, "hit": 3.5 + i * 5, "text": "",
             "drop": i == 2} for i in range(5)]
-tg = edits.build_timeline(grey_ms, "velocity", 6, song, off, {}, durations={"S": 40.0}, grade="none")
+tg = edits.build_timeline(grey_ms, "velocity", 6, song, off, {}, durations={"S": 30.0}, grade="none")
 outg = TMP / "steps_out.mp4"
 editrender.render(tg, {"S": {"source_path": str(steps)}}, song, outg, TMP / "steps.jpg")
 bad = []
@@ -132,16 +140,14 @@ for seg in tg["segments"]:
         src_t = edits.src_time(seg, round(n / 30 - seg["at"], 6))
         if abs(src_t - round(src_t)) < 0.1:            # too near a step to tell
             continue
-        want = 6 * int(src_t) * 255 / 219                # the grey step, as full-range RGB
-        got = float(frame(outg, n)[700:1200, 300:780, 1].mean())
-        if abs(got - want) > 6:
-            bad.append((round(seg["at"] + t, 2), round(src_t, 2), round(want), round(got, 1)))
+        got = bar_second(frame(outg, n))
+        if got != int(src_t):
+            bad.append((round(seg["at"] + t, 2), round(src_t, 2), got))
 expect(not bad, f"each frame shows its own second of footage {bad[:3]}")
 drop_seg = next(s for s in tg["segments"] if s["drop"])
 dn = int(round(drop_seg["at"] * 30))
-got = float(frame(outg, dn)[700:1200, 300:780, 1].mean())
-want = 6 * int(grey_ms[2]["hit"]) * 255 / 219
-expect(abs(got - want) <= 6, f"the frame on the drop is the drop moment's hit ({got:.0f} vs {want:.0f})")
+got = bar_second(frame(outg, dn))
+expect(got == int(grey_ms[2]["hit"]), f"the frame on the drop is the drop moment's hit (second {got})")
 
 # --- a speech edit with his voice and no song ---------------------------------------------
 print("== Cinematic, his voice only")
@@ -155,6 +161,36 @@ loud = lufs(outc)
 expect(abs(loud + 14) <= 1.0, f"his voice at about -14 LUFS ({loud:.1f})")
 fc = frame(outc, 45)
 expect(fc[:editrender.BAR_H - 10].max() < 30 and fc[-editrender.BAR_H + 10:].max() < 30, "black cinema bars")
+
+# --- picture and sound stay together ----------------------------------------------------------
+print("== his voice stays on his lips")
+sync = TMP / "sync.mp4"                     # a white flash and a beep at the same instant, every second (k + 0.5)
+ff("-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=30,geq=lum='if(lt(mod(T-0.5+10\\,1)\\,0.03)\\,235\\,16)':cb=128:cr=128",
+   "-f", "lavfi", "-i", "aevalsrc='if(lt(mod(t-0.5+10\\,1)\\,0.06)\\,0.6*sin(2*PI*1000*t)\\,0)':s=48000:d=30",
+   "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10", "-g", "15", "-c:a", "pcm_s16le", "-shortest",
+   str(sync.with_suffix(".mov")))
+sync = sync.with_suffix(".mov")
+swords = [{"w": f"w{i}", "start": 2.0 + i * 0.4, "end": 2.3 + i * 0.4} for i in range(60)]
+sm = [{"id": "a", "source": "Y", "start": 3.37, "end": 7.91, "hit": 5.0, "text": "", "drop": True},
+      {"id": "b", "source": "Y", "start": 14.12, "end": 18.66, "hit": 16.0, "text": "", "drop": False}]
+ts = edits.build_timeline(sm, "cinematic", 12, None, {"letterbox": False, "grain": False, "text": False},
+                          {"Y": swords}, durations={"Y": 30.0})
+outs = TMP / "sync_out.mp4"
+editrender.render(ts, {"Y": {"source_path": str(sync)}}, None, outs, TMP / "sync.jpg")
+raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(outs), "-vf", "scale=54:96,format=gray", "-f", "rawvideo", "-"],
+                     capture_output=True).stdout
+lum = np.frombuffer(raw, np.uint8).reshape(-1, 96, 54)[:, 30:66, 10:44].mean(axis=(1, 2))
+flashes = [i / 30 for i in range(1, len(lum)) if lum[i] > lum.max() * 0.6 and lum[i - 1] <= lum.max() * 0.6]
+pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", str(outs), "-vn", "-ac", "1", "-ar", "48000", "-f", "s16le", "-"],
+                     capture_output=True).stdout
+y = np.abs(np.frombuffer(pcm, np.int16).astype(np.float32))
+env = np.convolve(y, np.ones(96) / 96, mode="same")
+on = env > env.max() * 0.3
+beeps = [i / 48000 for i in range(1, len(on)) if on[i] and not on[i - 1]]
+gaps = [b - min(flashes, key=lambda f: abs(f - b)) for b in beeps if flashes]
+expect(len(flashes) >= 6 and len(beeps) >= 6, f"flashes and beeps found ({len(flashes)}, {len(beeps)})")
+expect(gaps and max(abs(g) for g in gaps) < 0.025,
+       f"every beep with its flash (worst {max(abs(g) for g in gaps) * 1000 if gaps else 0:.0f} ms)")
 
 # --- words: never cut, never over the face ---------------------------------------------------
 print("== the words")

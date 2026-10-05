@@ -786,18 +786,53 @@ def _seg(m: Dict[str, Any], at: float, dur: float, curve: List[List[float]], **k
     return seg
 
 
-def _beat_cuts(style: str, length: float, analysis: Dict[str, Any], notes: List[str], pace: int = 0) -> Dict[str, Any]:
-    """Where a beat edit cuts on this song: the song section, the drop, and every slot (in beats)."""
+def section_drop(analysis: Dict[str, Any], a: float, b: float) -> Optional[float]:
+    """The moment the song kicks in hardest between song seconds a and b: the song's own drop when it's
+    there, else the bar line after which it gets loudest (None when nothing in there kicks in)."""
+    drop = float(analysis.get("drop") or -1)
+    if a + 1.0 <= drop <= b - 3.0:
+        return drop
+    energy = analysis.get("energy") or []
+    per = 4.0                                                     # energy points a second
+    best, score = None, 0.06
+    for t in analysis.get("bars") or []:
+        if not a + 1.0 <= t <= b - 3.0:
+            continue
+        i = int(t * per)
+        before, after = energy[max(0, i - 8):i], energy[i:i + 8]
+        if before and after:
+            rise = sum(after) / len(after) - sum(before) / len(before)
+            if rise > score:
+                best, score = float(t), rise
+    return best
+
+
+def _beat_cuts(style: str, length: float, analysis: Dict[str, Any], notes: List[str], pace: int = 0,
+               song_start: Optional[float] = None) -> Dict[str, Any]:
+    """Where a beat edit cuts on this song: the song section, the drop, and every slot (in beats).
+    `song_start` (song seconds) picks the part of the song by hand; otherwise it's the part around the drop."""
     st = STYLES[style]
     g = beat_grid(analysis)
     grid, period, song_len = g["t"], g["period"], g["duration"]
     first_real = next(i for i, t in enumerate(grid) if t >= -0.01)
-    drop_i = _nearest(grid, float(analysis.get("drop") or grid[first_real]))
-    start_i = max(first_real, drop_i - st["pre_beats"])
     want = max(8, int(round(length / period / 4.0)) * 4)                # whole bars
     asked = want
-    while grid[start_i + want] > song_len + 0.05 and start_i - 4 >= first_real:
-        start_i -= 4
+    if song_start is not None:
+        bars = [i for i in range(first_real, len(grid)) if (i - g["phase"]) % 4 == 0 and grid[i] <= song_len]
+        start_i = min(bars, key=lambda i: abs(grid[i] - float(song_start))) if bars else first_real
+        while grid[start_i + want] > song_len + 0.05 and start_i - 4 >= first_real:
+            start_i -= 4
+        if abs(grid[start_i] - float(song_start)) > 4 * period + 0.05:
+            notes.append("The song ends soon after the part you picked, so the edit starts a little earlier in it.")
+        kick = section_drop(analysis, grid[start_i], grid[min(len(grid) - 1, start_i + want)])
+        drop_i = _nearest(grid, kick) if kick is not None else start_i + min(want - 4, 8)
+        if kick is None:
+            notes.append("Nothing in the part you picked kicks in hard, so the strongest moment lands on bar 3.")
+    else:
+        drop_i = _nearest(grid, float(analysis.get("drop") or grid[first_real]))
+        start_i = max(first_real, drop_i - st["pre_beats"])
+        while grid[start_i + want] > song_len + 0.05 and start_i - 4 >= first_real:
+            start_i -= 4
     shortest = max(8, -int(-7.0 // (4 * period)) * 4)                 # never under ~7 s
     while grid[start_i + want] > song_len + 0.05 and want > shortest:
         want -= 4
@@ -830,20 +865,21 @@ def _beat_cuts(style: str, length: float, analysis: Dict[str, Any], notes: List[
             "s0": grid[start_i], "slots": slots, "ds": next(j for j, (a, _) in enumerate(slots) if a == kd)}
 
 
-def slots_for(style: str, sound: Optional[Dict[str, Any]], length: float, pace: int = 0) -> Optional[Tuple[int, int]]:
+def slots_for(style: str, sound: Optional[Dict[str, Any]], length: float, pace: int = 0,
+              song_start: Optional[float] = None) -> Optional[Tuple[int, int]]:
     """For a beat edit: (shots before the drop, shots in all)."""
     analysis = (sound or {}).get("analysis") or {}
     if STYLES[style_key(style)]["pace"] != "beat" or len(analysis.get("beats") or []) < 4:
         return None
-    c = _beat_cuts(style_key(style), length, analysis, [], pace)
+    c = _beat_cuts(style_key(style), length, analysis, [], pace, song_start)
     return c["ds"], len(c["slots"])
 
 
 def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, analysis: Dict[str, Any],
                    fx: Dict[str, bool], durations: Dict[str, float], notes: List[str], pace: int = 0,
-                   flashes: str = "normal") -> Dict[str, Any]:
+                   flashes: str = "normal", song_start: Optional[float] = None) -> Dict[str, Any]:
     st = STYLES[style]
-    c = _beat_cuts(style, length, analysis, notes, pace)
+    c = _beat_cuts(style, length, analysis, notes, pace, song_start)
     grid, period, start_i, want, kd, s0 = c["grid"], c["period"], c["start_i"], c["want"], c["kd"], c["s0"]
     slots, ds = c["slots"], c["ds"]
     drop_i = start_i + kd
@@ -916,20 +952,23 @@ def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, ana
                 seg["glitches"] = [0.0]
             if fx.get("blur") and ka > 0:
                 seg["blur_in"] = True
-            if style in ("velocity", "flow") and count > 1 and n % 2 == 1:
+            if style in ("velocity", "flow") and count > 1 and n % 2 == 1 and fx.get("pulse"):
                 seg["zoom"] = 1.14                           # a punch-in on the beat inside one shot
             if use_text and n == 0 and m.get("text") and (is_drop or a >= HOOK_SECONDS - 0.05):
                 seg["text"], seg["key"] = m["text"], m.get("key", "")
             run_segs.append(seg)
             j += 1
         if st.get("dip"):
-            run_segs[0]["dip_in"] = bool(segments)
+            run_segs[0]["dip_in"] = bool(segments) and not run_segs[0]["drop"]   # the drop hits, never fades in
             run_segs[-1]["dip_out"] = True
         _place(m, run_segs, durations.get(m["source"], 1e9),
                "drop" if run_segs[0]["drop"] else ("ramp" if any(s.get("dip") is not None for s in run_segs)
                                                     else "even"))
         segments.extend(run_segs)
     segments[-1]["dip_out"] = False
+    for a, b in zip(segments, segments[1:]):
+        if b["drop"]:
+            a["dip_out"] = False                            # straight into the drop
     total = grid[start_i + want] - s0
     return {"segments": segments, "length": total, "drop_at": grid[start_i + kd] - s0,
             "music": {"start": round(s0, 4), "end": round(s0 + total, 4), "at": 0.0,
@@ -938,7 +977,7 @@ def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, ana
 
 def _speech_timeline(ordered: List[Dict[str, Any]], style: str, length: float, analysis: Optional[Dict[str, Any]],
                      fx: Dict[str, bool], durations: Dict[str, float], notes: List[str],
-                     flashes: str = "normal") -> Dict[str, Any]:
+                     flashes: str = "normal", song_start: Optional[float] = None) -> Dict[str, Any]:
     st = STYLES[style]
     drop_m = next((m for m in ordered if m.get("drop")), None)
     # whole moments, in order, as many as fit (the drop moment always plays)
@@ -978,7 +1017,13 @@ def _speech_timeline(ordered: List[Dict[str, Any]], style: str, length: float, a
     else:
         g = beat_grid(analysis)
         grid, period = g["t"], g["period"]
-        drop = grid[_nearest(grid, float(analysis.get("drop") or 0.0))]
+        kick = float(analysis.get("drop") or 0.0)
+        if song_start is not None:                            # the part picked by hand: its strongest kick-in
+            found = section_drop(analysis, float(song_start), float(song_start) + 40.0)
+            if found is None:
+                notes.append("Nothing in the part of the song you picked kicks in hard, so its first bar is used.")
+            kick = found if found is not None else float(song_start)
+        drop = grid[_nearest(grid, kick)]
         di = chosen.index(drop_m)
         song: List[Dict[str, Any]] = [{} for _ in chosen]      # song-time start, end and pre-roll per moment
 
@@ -1063,7 +1108,8 @@ def build_timeline(moments: List[Dict[str, Any]], style: str, length: float,
                    words_by_source: Dict[str, List[Dict[str, Any]]],
                    voice_level: Optional[float] = None, music_level: Optional[float] = None,
                    durations: Optional[Dict[str, float]] = None, grade: Optional[str] = None,
-                   hook: str = "", pace: Any = 0, flashes: str = "normal") -> Dict[str, Any]:
+                   hook: str = "", pace: Any = 0, flashes: str = "normal",
+                   song_start: Optional[float] = None) -> Dict[str, Any]:
     """Where every moment sits in the edit: cut on the beat, the best one on the drop, ending on a bar line."""
     style = style_key(style)
     st = STYLES[style]
@@ -1084,10 +1130,11 @@ def build_timeline(moments: List[Dict[str, Any]], style: str, length: float,
     if st["pace"] == "beat":
         if not analysis or not analysis.get("beats"):
             raise ValueError(f"{_a(st['name'])} edit is cut to music — pick a song first")
-        built = _beat_timeline(ordered, style, float(length), analysis, fx, durations, notes, pace, flashes)
+        built = _beat_timeline(ordered, style, float(length), analysis, fx, durations, notes, pace, flashes,
+                               song_start)
     else:
         built = _speech_timeline(ordered, style, float(length), analysis if analysis and analysis.get("beats")
-                                 else None, fx, durations, notes, flashes)
+                                 else None, fx, durations, notes, flashes, song_start)
     segments = built["segments"]
     motion = {m["id"]: m.get("motion") for m in ordered}
     for i, seg in enumerate(segments):
@@ -1215,7 +1262,13 @@ def check_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
            "grade": settings.get("grade") if settings.get("grade") in GRADES else "",
            "pace": settings.get("pace") if settings.get("pace") in PACES else "normal",
            "flashes": settings.get("flashes") if settings.get("flashes") in FLASHES else "normal",
-           "campaign_id": camp_id}
+           "song_start": None, "campaign_id": camp_id}
+    if sound and settings.get("song_start") not in (None, "", "auto"):
+        try:
+            out["song_start"] = round(max(0.0, min(float(sound.get("duration") or 0) - 5.0,
+                                                   float(settings["song_start"]))), 2)
+        except (TypeError, ValueError):
+            pass
     for key in ("voice", "music"):
         if settings.get(key) is not None:
             out[key] = max(0.0, min(1.5, float(settings[key])))
@@ -1298,7 +1351,8 @@ def plan_edit(eid: str, repick: bool) -> Dict[str, Any]:
     _stage(eid, "Fitting it to the beat" if sound else "Laying out the moments", 22)
     timeline = build_timeline(plan["moments"], s["style"], s["length"], sound, fx, words,
                               s.get("voice"), s.get("music"), durations_for(s["sources"]), s.get("grade"),
-                              plan.get("hook", ""), s.get("pace", "normal"), s.get("flashes", "normal"))
+                              plan.get("hook", ""), s.get("pace", "normal"), s.get("flashes", "normal"),
+                              s.get("song_start"))
     timeline["notes"] = fit_notes + timeline["notes"]
     plan["timeline"] = timeline
     store.update_edit(eid, plan=plan)
@@ -1310,7 +1364,8 @@ def match_motion(eid: str, moments: List[Dict[str, Any]], sources: List[Dict[str
                  pace: Any = "normal") -> Tuple[List[Dict[str, Any]], List[str]]:
     """Flow: measure how every shot moves and chain them so each cut carries the motion on."""
     _stage(eid, "Matching the movement between shots", 14)
-    fit = slots_for("flow", sound, length, PACES.get(pace, 0) if isinstance(pace, str) else int(pace or 0))
+    fit = slots_for("flow", sound, length, PACES.get(pace, 0) if isinstance(pace, str) else int(pace or 0),
+                    (store.get_edit(eid) or {}).get("settings", {}).get("song_start"))
     paths = {x["id"]: Path(x["source_path"]) for x in sources}
     durs = {x["id"]: float(x.get("duration") or 0) or 1e9 for x in sources}
     return motionmatch.order(moments, paths, durs, keep=fit[1] if fit else None, drop_at=fit[0] if fit else None,
@@ -1430,7 +1485,11 @@ def remake(eid: str, changes: Dict[str, Any]) -> None:
     if changes.get("style"):
         s["style"] = style_key(changes["style"])
     if "sound" in changes:
+        if (changes["sound"] or "") != (s.get("sound") or ""):
+            s["song_start"] = None                            # a new song starts from its own best part
         s["sound"] = changes["sound"] or ""
+    if "song_start" in changes:
+        s["song_start"] = changes["song_start"]
     if changes.get("length"):
         s["length"] = changes["length"]
     if isinstance(changes.get("effects"), dict):
@@ -1507,7 +1566,8 @@ def versions(eid: str, sound_ids: List[str]) -> List[str]:
             continue
         keep = {k: plan[k] for k in ("moments", "title", "hook", "post", "pick_notes", "tone", "tone_for") if k in plan}
         name = sound["name"] if sound else "no music"
-        made.append(create({**edit["settings"], "sound": sid}, keep, f"{edit['title'][:70]} · {name}"))
+        made.append(create({**edit["settings"], "sound": sid, "song_start": None}, keep,
+                           f"{edit['title'][:70]} · {name}"))
     if not made:
         raise ValueError("Pick at least one other song")
     return made
@@ -1767,7 +1827,8 @@ def edit_json(e: Dict[str, Any]) -> Dict[str, Any]:
         "flashes": s.get("flashes", "normal"),
         "voice": tl.get("voice", s.get("voice", st["voice"])),
         "music": (tl.get("music") or {}).get("level", s.get("music", st["music"])),
-        "sound": sound_json(sound) if sound else None,
+        "sound": sound_json(sound) if sound else None, "song_start": s.get("song_start"),
+        "song_part": [(tl.get("music") or {}).get("start"), (tl.get("music") or {}).get("end")] if tl.get("music") else None,
         "notes": (plan.get("pick_notes") or []) + (tl.get("notes") or []),
         "caption": post.get("caption") or e.get("caption") or "", "hashtags": post.get("hashtags") or e.get("hashtags") or [],
         "post_text": post.get("text") or "", "checklist": post.get("checklist") or [],

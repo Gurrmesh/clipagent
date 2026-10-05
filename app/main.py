@@ -942,7 +942,7 @@ def edit_sources() -> Dict[str, Any]:
 def edit_styles() -> Dict[str, Any]:
     return {
         "styles": [{"id": k, "name": v["name"], "what": v["what"], "pace": v["pace"], "length": v["length"],
-                    "text": v["text"],
+                    "text": v["text"], "pre_beats": v.get("pre_beats", 0),
                     "needs_music": bool(v.get("needs_music")), "music_optional": bool(v.get("music_optional")),
                     "effects": v["effects"], "grade": v["grade"], "voice": v["voice"], "music": v["music"]}
                    for k, v in edits.STYLES.items()],

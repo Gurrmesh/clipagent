@@ -850,3 +850,11 @@ input[type=checkbox] { accent-color: var(--accent); width: 17px; height: 17px; f
   .ee-cardhead { flex-direction: row; flex-wrap: wrap; }
   .ee-card .seg button { padding: 7px 10px; font-size: 13px; }
 }
+
+.ee-part { margin-top: 14px; }
+.part-curve { height: 46px; border-radius: var(--r-sm); background: var(--surface-2); border: 1px solid var(--line); cursor: pointer; overflow: hidden; }
+.part-curve svg { width: 100%; height: 100%; display: block; }
+.part-curve polyline { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; vector-effect: non-scaling-stroke; }
+.part-curve .win { fill: var(--pop); fill-opacity: .32; stroke: #E0B800; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.part-curve line { stroke: var(--bad); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.ee-part .inline { margin-top: 6px; justify-content: space-between; }

@@ -57,8 +57,8 @@ GRADES: Dict[str, Dict[str, Any]] = {
              "gamma": (1.0, 1.0, 0.97), "sat": 0.90},
     "tealorange": {"contrast": 0.22, "lift": (0.05, 0.015, -0.03), "gain": (0.88, 0.99, 1.07),
                    "gamma": (1.02, 1.0, 0.95), "sat": 1.12},
-    "teal": {"contrast": 0.24, "lift": (0.02, 0.0, -0.035), "gain": (0.96, 0.93, 0.82),
-             "gamma": (1.12, 1.15, 1.25), "sat": 0.72},
+    "teal": {"contrast": 0.24, "lift": (0.045, 0.02, -0.03), "gain": (0.93, 0.96, 1.0),
+             "gamma": (1.12, 1.14, 1.16), "sat": 0.74},
     "mono": {"contrast": 0.34, "lift": (-0.03, -0.03, -0.03), "gain": (1.05, 1.05, 1.05), "sat": 0.0},
     "gold": {"contrast": 0.14, "lift": (-0.02, 0.01, 0.03), "gain": (0.84, 1.0, 1.08),
              "gamma": (1.08, 0.98, 0.94), "sat": 1.06},
@@ -245,7 +245,7 @@ def grade_lut(name: str, look: Optional[Dict[str, Any]] = None, target: Optional
     g = GRADES.get(name, GRADES["none"])
     x = np.arange(256, dtype=np.float64) / 255.0
     chans = []
-    match = look is not None and target is not None and name != "none"
+    match = look is not None and target is not None
     if match:
         m = np.maximum(np.asarray(look["mean"], np.float64) / 255.0, 0.02)
         pivot = float(target.mean())
@@ -529,8 +529,10 @@ def build_ass(tl: Dict[str, Any], out: Path, face: Optional[Dict[str, float]] = 
         for i, s in enumerate(segs):
             if not s.get("text"):
                 continue
-            a = s["at"] if s.get("drop") else max(s["at"], hook_end)
+            a = max(s["at"], hook_end)                      # never over the hook, the drop's line included
             b = min(run_end(i), a + (1.7 if mode == "punch" else 2.6)) - 0.04
+            if b - a < 0.6:
+                continue
             if mode == "punch":
                 lines, size = fit(_clean(s["text"]).upper(), 236, 2, 150)
                 tags, colour, style = "\\fscx112\\fscy112\\t(0,90,\\fscx100\\fscy100)", YELLOW, "Punch"

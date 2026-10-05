@@ -2406,6 +2406,7 @@ function renderEditControls(e) {
   $('ee-voice').value = val('voice', e.voice); $('ee-voiceval').textContent = pct($('ee-voice').value);
   $('ee-music').value = val('music', e.music); $('ee-musicval').textContent = pct($('ee-music').value);
   $('ee-music').disabled = !sound;
+  renderPart(e);
   $('ee-hook').value = val('hook', e.hook);
   $('ee-caption').value = e.caption || '';
   $('ee-tags').value = (e.hashtags || []).join(' ');
@@ -2418,7 +2419,60 @@ function renderEditControls(e) {
 ['ee-pace', 'ee-flashes'].forEach(id => document.querySelectorAll(`#${id} button`).forEach(b => b.addEventListener('click', () => {
   EE.draft[id === 'ee-pace' ? 'pace' : 'flashes'] = b.dataset.v; segSet(id, b.dataset.v); draftChanged();
 })));
-$('ee-song').addEventListener('change', () => { EE.draft.sound = $('ee-song').value; $('ee-music').disabled = !EE.draft.sound; draftChanged(); });
+$('ee-song').addEventListener('change', () => {
+  EE.draft.sound = $('ee-song').value; delete EE.draft.song_start;
+  $('ee-music').disabled = !EE.draft.sound; renderPart(EE.edit); draftChanged();
+});
+
+/* the part of the song: the loudness curve, the stretch used, and the drop */
+function renderPart(e) {
+  const wrap = $('ee-partwrap');
+  const songId = val('sound', e.settings.sound || '');
+  const s = EM.sounds.find(x => x.id === songId);
+  wrap.classList.toggle('hidden', !s || !(s.energy || []).length);
+  if (!s || !(s.energy || []).length) return;
+  const W = 600, H = 46, dur = s.duration || 1, len = val('length', e.settings.length);
+  const sameSong = songId === (e.settings.sound || '');
+  const st = styleOf(val('style', e.style));
+  let a, b, auto;
+  if ('song_start' in EE.draft) { auto = EE.draft.song_start == null; a = auto ? null : EE.draft.song_start; }
+  else { auto = e.song_start == null; a = sameSong && e.song_part ? e.song_part[0] : e.song_start; }
+  const changed = 'song_start' in EE.draft || !sameSong || 'length' in EE.draft || 'style' in EE.draft;
+  if (a == null || (auto && changed)) {
+    // the automatic part: a beat edit starts a few beats before the drop; a voice edit lines the drop up with its best line
+    const pre = st.pace === 'beat' ? (st.pre_beats || 4) * 60 / (s.bpm || 120) : len / 2;
+    a = Math.max(0, Math.min(dur - len, (s.drop || 0) - pre));
+  }
+  b = !changed && sameSong && e.song_part ? e.song_part[1] : Math.min(dur, a + len);
+  const x = t => (t / dur) * W;
+  const step = W / Math.max(1, s.energy.length - 1);
+  const pts = s.energy.map((v, i) => `${(i * step).toFixed(1)},${(H - 2 - v * (H - 6)).toFixed(1)}`).join(' ');
+  $('ee-part').innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+      <polyline points="0,${H} ${pts} ${W},${H}"/>
+      <rect class="win" x="${x(a).toFixed(1)}" y="1" width="${Math.max(2, x(b) - x(a)).toFixed(1)}" height="${H - 2}" rx="3"/>
+      <line x1="${x(s.drop).toFixed(1)}" x2="${x(s.drop).toFixed(1)}" y1="0" y2="${H}"/></svg>`;
+  $('ee-partval').textContent = `${auto ? 'Auto · ' : ''}${fmt(a)}–${fmt(b)} of ${fmt(dur)}`;
+  $('ee-part').setAttribute('aria-valuetext', `starts at ${fmt(a)}`);
+  $('ee-partauto').disabled = auto;
+}
+function pickPart(t) {
+  const s = EM.sounds.find(x => x.id === val('sound', EE.edit.settings.sound || ''));
+  if (!s) return;
+  EE.draft.song_start = Math.max(0, Math.min(s.duration - 5, Math.round(t * 10) / 10));
+  renderPart(EE.edit); draftChanged();
+}
+$('ee-part').addEventListener('click', ev => {
+  const r = $('ee-part').getBoundingClientRect();
+  const s = EM.sounds.find(x => x.id === val('sound', EE.edit.settings.sound || ''));
+  if (s) pickPart(((ev.clientX - r.left) / r.width) * s.duration);
+});
+$('ee-part').addEventListener('keydown', ev => {
+  if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+  ev.preventDefault();
+  const cur = EE.draft.song_start ?? (EE.edit.song_part ? EE.edit.song_part[0] : 0);
+  pickPart(cur + (ev.key === 'ArrowRight' ? 2 : -2));
+});
+$('ee-partauto').addEventListener('click', () => { EE.draft.song_start = null; renderPart(EE.edit); draftChanged(); });
 $('ee-grade').addEventListener('change', () => { EE.draft.grade = $('ee-grade').value; draftChanged(); });
 ['voice', 'music'].forEach(k => $(`ee-${k}`).addEventListener('input', () => {
   EE.draft[k] = +$(`ee-${k}`).value;

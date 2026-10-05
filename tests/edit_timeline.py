@@ -188,14 +188,15 @@ tm = edits.build_timeline(moments(7, span=4.0, drop=2), "money", 20, S128, {}, W
 expect(all(abs(s["dur"] - 4 * P128) < EPS for s in tm["segments"][:-1]), "Money: a cut every four beats")
 expect(all(abs(s["speed"] - 0.8) < 0.01 for s in tm["segments"] if not s["drop"]), "Money: slowed to 0.8×")
 tms = tm["segments"]
-expect(all(a["dip_out"] == (a["moment"] != b["moment"]) for a, b in zip(tms, tms[1:])) and not tms[-1]["dip_out"],
-       "Money: dips between moments, none at the very end (it loops)")
+expect(all(a["dip_out"] == (a["moment"] != b["moment"] and not b["drop"]) for a, b in zip(tms, tms[1:]))
+       and not tms[-1]["dip_out"], "Money: dips between moments, none at the very end (it loops)")
+expect(not any(s["dip_in"] for s in tms if s["drop"]), "Money: never a dip into the drop — it hits")
 
 print("== effects switched off")
 off = {k: False for k in edits.EFFECTS}
 t3 = edits.build_timeline(moments(10, drop=4), "velocity", 20, S128, off, WORDS, durations=DURS)
-expect(all(not (s["flashes"] or s["shakes"] or s["glitches"] or s["pulses"]) for s in t3["segments"]),
-       "no flashes, shakes, glitches or zooms when they're off")
+expect(all(not (s["flashes"] or s["shakes"] or s["glitches"] or s["pulses"]) and s["zoom"] == 1.0
+           for s in t3["segments"]), "no flashes, shakes, glitches or zooms when they're off")
 expect(all(abs(s["speed"] - 1.0) < 1e-6 for s in t3["segments"]), "no ramps or slow-mo when they're off")
 expect(t3["loop"] == 0 and t3["hook"] is None, "no loop and no hook when they're off")
 
@@ -240,6 +241,26 @@ long_sp = [dict(m, end=m["start"] + 12) for m in sp] + [
 tl4 = edits.build_timeline(long_sp, "cinematic", 25, S128, {}, WORDS, durations=DURS)
 ids = [s["moment"] for s in tl4["segments"]]
 expect("c2" in ids and len(ids) < 4 and tl4["notes"], f"kept {ids}, with a note why")
+
+# --- picking the part of the song ------------------------------------------------------------
+print("== picking the part of the song")
+part = song(128, 20.99, duration=70.0)
+an = part["analysis"]
+chorus = min(an["bars"], key=lambda b: abs(b - 45.0))               # a second, bigger kick-in later on
+an["energy"] = [0.2 if t / 4 < 20.99 else (0.5 if t / 4 < chorus else 1.0) for t in range(70 * 4)]
+tp = edits.build_timeline(moments(9, drop=4), "velocity", 15, part, {}, WORDS, durations=DURS, song_start=37.0)
+start = tp["music"]["start"]
+expect(min(abs(start - b) for b in an["bars"]) < EPS and abs(start - 37.0) < 2 * 60 / 128 + EPS,
+       f"the edit starts on the bar nearest the part picked ({start:.2f} s)")
+expect(abs(tp["drop_at"] + start - chorus) < EPS, f"the drop lands on that part's kick-in ({chorus:.2f} s)")
+expect(all(near_beat(x["at"] + start, an["beats"]) < EPS for x in tp["segments"]), "cuts still on the beat")
+quiet = edits.build_timeline(moments(9, drop=4), "velocity", 15, part, {}, WORDS, durations=DURS, song_start=50.0)
+expect(quiet["notes"] and abs(quiet["drop_at"] - 8 * P128) < EPS,
+       "a part with no kick-in: the best moment lands on bar 3, and it says so")
+ts2 = edits.build_timeline(sp, "cinematic", 30, part, {}, WORDS, durations=DURS, song_start=37.0)
+song0 = ts2["music"]["start"] - ts2["music"]["at"]
+dseg = next(x for x in ts2["segments"] if x["drop"])
+expect(abs(dseg["at"] + dseg["hit"] + song0 - chorus) < EPS, "a speech edit meets the picked part's kick-in")
 
 # --- the editor's controls ------------------------------------------------------------------
 print("== moments off, reordered, the drop moved")

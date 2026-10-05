@@ -197,6 +197,15 @@ expect(j4["moments"][0]["id"] == moments[-1]["id"] and next(m for m in j4["momen
 r = client.post(f"/api/edits/{eid}/remake", json={"moments": [{"id": m["id"], "off": True} for m in moments]})
 expect(r.status_code == 400 and "switched off" in r.json()["detail"], "all moments off: plain words")
 
+r = client.post(f"/api/edits/{eid}/remake", json={"song_start": 25.0})
+wait(eid)
+jp = client.get(f"/api/edits/{eid}").json()
+expect(jp["song_start"] == 25.0 and jp["song_part"] and abs(jp["song_part"][0] - 25.0) < 2.0,
+       f"a part of the song picked by hand ({jp['song_part'][0]:.1f} s)")
+client.post(f"/api/edits/{eid}/remake", json={"song_start": None})
+wait(eid)
+expect(client.get(f"/api/edits/{eid}").json()["song_start"] is None, "…and back to the automatic part")
+
 print("== typed changes")
 ANSWERS["change_edit"] = {"understood": "Black and white, with a flash on every cut.", "grade": "mono",
                           "flashes": "many"}
