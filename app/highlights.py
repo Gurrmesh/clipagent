@@ -40,8 +40,10 @@ CLIP_TOOL = {
                         "type": {"type": "string", "enum": CLIP_TYPES, "description": "What kind of moment this is. It decides how the clip is built and edited."},
                         "needs_context": {"type": "boolean", "description": "True if a viewer who never saw the video would be confused, or feel nothing, without something that happened earlier or later in it."},
                         "context_note": {"type": "string", "description": "If needs_context: what that viewer is missing, in one line. Else empty."},
+                        "speaker": {"type": "string", "enum": ["creator", "other", "unclear"], "description": "Who says this moment's key lines (the ones the hook is about): creator = the creator named above (or the channel's own host), other = anyone else (a guest, a friend, a caller, a clip being reacted to), unclear = the words and context don't settle it."},
+                        "speaker_name": {"type": "string", "description": "When speaker is other: their name if it is said in the video or the title, else a short neutral description ('his friend', 'the guest'). Else empty."},
                     },
-                    "required": ["start", "end", "title", "hook", "score", "reason", "tags", "type", "needs_context"],
+                    "required": ["start", "end", "title", "hook", "score", "reason", "tags", "type", "needs_context", "speaker"],
                 },
             }
         },
@@ -82,9 +84,15 @@ Name who or what is happening. "He has no idea what's behind this door" makes th
 Boundaries matter more than anything. Start on the first word of a sentence — never on the \
 last words of the one before — and end on the last word of the payoff. Loud moments in the \
 energy hints are a signal that something happened there — check them, but only clip them if \
-the words hold up."""
+the words hold up.
 
-PROMPT = """Video: {title}
+Say who speaks. The transcript has no speaker labels, so work it out from the questions and \
+answers, names said aloud, who is being addressed, and the video's title — and say unclear when \
+you can't. Never put words in the creator's mouth: a hook or caption may say the creator said, \
+explained or thinks something ONLY when speaker is creator. When someone else says it, name them \
+("His friend Timmy asks why…") or name no one — never "<creator> says…" for a line they didn't say."""
+
+PROMPT = """Video: {title}{creator_line}
 Segment of the source covered by this transcript: {block_start} to {block_end} (seconds).
 All timestamps below are absolute seconds in the full video — use that same scale.
 
@@ -197,16 +205,21 @@ def find_highlights(
     max_len: float | None = None,
     guidance: str = "",
     platforms: List[str] | None = None,
+    creator: str = "",
 ) -> List[Dict[str, Any]]:
     """Run Claude over the transcript in blocks and return merged, ranked clips.
 
     `min_len`/`max_len` narrow the usual length limits and `guidance` adds a
-    campaign brief's rules to what Claude is told — both only for campaign runs."""
+    campaign brief's rules to what Claude is told — both only for campaign runs.
+    `creator` (a campaign's person) is who a hook may never credit with someone else's words."""
     global LAST_ERROR
     LAST_ERROR = ""
     peaks = peaks or []
     lo, hi, ideal = length_window(min_len, max_len, platforms)
     extra = CAMPAIGN_NOTE.format(guidance=guidance.strip()) if guidance.strip() else ""
+    creator = (creator or "").strip()
+    creator_line = (f"\nThe creator (the person these clips are for): {creator}. Other people in it are "
+                    "guests, friends or callers." if creator else "")
     if not segments:
         return _fallback(peaks, duration, want, lo, hi)
 
@@ -236,7 +249,7 @@ def find_highlights(
                 tools=[CLIP_TOOL],
                 tool_choice={"type": "tool", "name": "submit_clips"},
                 messages=[{"role": "user", "content": PROMPT.format(
-                    title=title or "Untitled",
+                    title=title or "Untitled", creator_line=creator_line,
                     block_start=f"{b_start:.0f}", block_end=f"{b_end:.0f}",
                     energy=_energy_text(peaks, b_start, b_end),
                     transcript=transcript, want=per_block,
@@ -258,11 +271,11 @@ def find_highlights(
     # Each block scored blind to the others, so put them all on one scale
     # before ranking — and pick up the post copy while we are there.
     if len(blocks) > 1 or len(found) > 1:
-        found = rerank(title or "Untitled", found, segments, guidance=guidance)
+        found = rerank(title or "Untitled", found, segments, guidance=guidance, creator=creator)
     if progress:
         progress(100)
 
-    return rank(found, peaks, duration, want, lo, hi)
+    return rank(found, peaks, duration, want, lo, hi, creator=creator)
 
 
 def _num(value: Any, default: float) -> float:
@@ -290,6 +303,7 @@ def rank(
     want: int,
     min_len: float = MIN_LEN,
     max_len: float = MAX_LEN,
+    creator: str = "",
 ) -> List[Dict[str, Any]]:
     """Clean up boundaries, blend in audio energy, drop overlaps, sort."""
     cleaned: List[Dict[str, Any]] = []
@@ -329,7 +343,11 @@ def rank(
             "needs_context": clip.get("needs_context") in (True, "true", "True", 1),
             "context_note": _text(clip.get("context_note"))[:200],
             "headline": _text(clip.get("headline"))[:60],
+            "speaker": clip.get("speaker") if clip.get("speaker") in SPEAKERS else "unclear",
+            "speaker_name": _text(clip.get("speaker_name"))[:60],
         })
+        if creator:
+            credit_clip(cleaned[-1], None, creator)
 
     cleaned.sort(key=lambda c: c["score"], reverse=True)
     kept: List[Dict[str, Any]] = []
@@ -343,6 +361,111 @@ def rank(
     for n, clip in enumerate(kept, 1):
         clip["rank"] = n
     return kept
+
+
+# --- who said it -------------------------------------------------------------------
+# A hook that says "TJR explains…" over his friend's words gets the post rejected
+# and misleads people. Claude is told the rule; this enforces it in code.
+
+SPEAKERS = ("creator", "other", "unclear")
+_SAY = (r"(?:just\s+|really\s+|literally\s+|finally\s+)?(?:says?|said|saying|explains?|explained|reveals?|revealed|"
+        r"admits?|admitted|claims?|claimed|tells?|told|thinks?|believes?|warns?|warned|asks?|asked|answers?|"
+        r"answered|swears?|insists?|breaks?\s+down|on)")
+_OWN = (r"(?:advice|take|rule|rules|tip|tips|secret|secrets|answer|words|lesson|lessons|strategy|warning|quote|"
+        r"opinion|theory|story|method)")
+_NOT_A_NAME = {"his", "her", "their", "the", "a", "an", "my", "our", "your", "some", "someone", "somebody",
+               "friend", "guest", "caller", "host", "guy", "girl", "man", "woman", "person", "brother", "sister",
+               "co-host", "cohost", "chat", "viewer", "student", "other"}
+
+
+def _names(creator: str) -> str:
+    parts = creator.split()
+    names = {creator.strip()}
+    if len(parts) > 1 and len(parts[0]) >= 3:
+        names.add(parts[0])                        # "Kevin says…" for Kevin Langue
+    alts = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True) if n)
+    return rf"(?<![\w@#])\[?(?:{alts})\]?(?![\w])"
+
+
+def _credit_patterns(name: str) -> List[str]:
+    return [rf"^\W*{name}\s*[:—–-]\s*\S", rf"{name}\s+{_SAY}\b",
+            rf"{name}['’]s\s+(?:\#?\d+\s+|top\s+|best\s+|real\s+|golden\s+|biggest\s+)?{_OWN}\b",
+            rf"according\s+to\s+{name}", rf"[\"”'’]\s*[—–-]+\s*{name}\W*$"]
+
+
+def credits_creator(text: str, creator: str) -> bool:
+    """Does this text put words in the creator's mouth ("TJR says…", "TJR: …", "TJR's #1 rule")?"""
+    if not (text or "").strip() or not (creator or "").strip():
+        return False
+    return any(re.search(p, text, re.I) for p in _credit_patterns(_names(creator)))
+
+
+def _proper_name(other: str) -> str:
+    """'his friend Timmy' -> 'Timmy'; 'the guest' -> ''."""
+    words = [w.strip(".,;:!?\"'()") for w in (other or "").split()]
+    run: List[str] = []
+    for w in words:
+        if w and w[0].isupper() and w.lower() not in _NOT_A_NAME:
+            run.append(w)
+        elif run:
+            break
+    return " ".join(run[:3])
+
+
+def fix_credit(text: str, creator: str, speaker: str = "unclear", other: str = "") -> str:
+    """The text with any credit to the creator for words they didn't say taken out —
+    put on the real speaker when their name is known, otherwise on no one."""
+    if not text or not creator or speaker == "creator" or not credits_creator(text, creator):
+        return text
+    name = _names(creator)
+    who = _proper_name(other) if speaker == "other" else ""
+    out = text
+    if who:                                   # only where the words are credited, not "Timmy asks TJR…"
+        for pat in _credit_patterns(name):
+            out = re.sub(pat, lambda m: re.sub(name, who, m.group(0), flags=re.I), out, flags=re.I)
+    else:
+        out = re.sub(rf"^\W*{name}\s*[:—–-]\s*", "", out, flags=re.I)
+        out = re.sub(rf"^\W*{name}\s+{_SAY}\s+(?:that\s+)?", "", out, flags=re.I)
+        out = re.sub(rf"\b{name}\s+{_SAY}\s+(?:that\s+)?", "", out, flags=re.I)
+        out = re.sub(rf"^\W*{name}['’]s\s+", "The ", out, flags=re.I)
+        out = re.sub(rf"{name}['’]s\s+", "the ", out, flags=re.I)
+        out = re.sub(rf",?\s*according\s+to\s+{name},?", "", out, flags=re.I)
+        out = re.sub(rf"\s*[—–-]+\s*{name}\W*$", "", out, flags=re.I)
+    out = re.sub(r"\s{2,}", " ", out).strip(" ,;:—–-")
+    if out and out[0].islower() and not out.startswith("["):
+        out = out[0].upper() + out[1:]
+    return out or text
+
+
+def credit_clip(clip: Dict[str, Any], style_edits: Dict[str, Any] | None, creator: str) -> List[str]:
+    """Hold a clip's hook, caption and on-screen cards to the rule: words go to whoever said them.
+    Returns a note for each change (also kept on the clip as 'credit_note')."""
+    if not creator:
+        return []
+    speaker = clip.get("speaker") if clip.get("speaker") in SPEAKERS else "unclear"
+    other = clip.get("speaker_name") or ""
+    notes = []
+    for key in ("hook", "caption"):
+        before = clip.get(key) or ""
+        after = fix_credit(before, creator, speaker, other)
+        if after != before:
+            clip[key] = after
+            notes.append(f"{key}: “{before}” → “{after}”")
+    if style_edits:
+        if style_edits.get("hook"):
+            style_edits["hook"] = fix_credit(style_edits["hook"], creator, speaker, other)
+        for card in style_edits.get("cards") or []:
+            if card.get("text"):
+                fixed = fix_credit(card["text"], creator, speaker, other)
+                if fixed != card["text"]:
+                    notes.append(f"card: “{card['text']}” → “{fixed}”")
+                    card["text"] = fixed
+    if notes:
+        clip["credit_note"] = ((f"Didn't credit {creator} with words {_proper_name(other) or 'someone else'} says"
+                                if speaker == "other" else
+                                f"Took {creator}'s name off words nobody could confirm {creator} says")
+                               + ": " + "; ".join(notes))[:300]
+    return notes
 
 
 SENTENCE_END = re.compile(r"[.!?…][\"'”’)\]]*$")
