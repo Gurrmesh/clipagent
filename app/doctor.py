@@ -18,8 +18,10 @@ import base64
 import json
 import re
 import subprocess
+import threading
 import time
 import traceback
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -163,15 +165,66 @@ fill_frame (when there are bars or the subject is tiny), none. Use severity "fix
 would really cost views."""
 
 
-def frames(path: Path, seconds: float, width: int = 360) -> List[Tuple[float, bytes]]:
+def frame_times(seconds: float) -> List[float]:
+    """When the doctor looks: the feed's first frame, the hook, and spread through the rest."""
     times = [0.0, 1.0, 2.6, seconds * 0.35, seconds * 0.6, seconds * 0.85, max(0.0, seconds - 0.4)]
+    return sorted({round(min(max(0.0, t), max(0.0, seconds - 0.05)), 2) for t in times})
+
+
+# Full-size frames, decoded once per version of a clip file and shared: the
+# campaign look (lookcheck.py) and the doctor look at many of the same moments.
+_FRAME_CACHE: "OrderedDict[tuple, bytes]" = OrderedDict()
+_FRAME_LOCK = threading.Lock()
+FRAME_CACHE_MAX = 40
+
+
+def grab(path: Path, times: List[float]) -> List[Tuple[float, Any]]:
+    """(time, full-size BGR frame) at each time that could be read."""
+    import cv2
+    import numpy as np
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return []
+    base = (str(Path(path).resolve()), st.st_mtime_ns, st.st_size)
     out = []
-    for t in sorted({round(min(max(0.0, t), max(0.0, seconds - 0.05)), 2) for t in times}):
-        proc = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t:.2f}", "-i", str(path), "-frames:v", "1",
-                               "-vf", f"scale={width}:-2", "-q:v", "6", "-f", "image2pipe", "-vcodec", "mjpeg", "-"],
-                              capture_output=True)
-        if proc.returncode == 0 and proc.stdout[:2] == b"\xff\xd8":
-            out.append((t, proc.stdout))
+    for t in times:
+        key = base + (round(float(t), 2),)
+        with _FRAME_LOCK:
+            jpg = _FRAME_CACHE.get(key)
+            if jpg is not None:
+                _FRAME_CACHE.move_to_end(key)
+        if jpg is None:
+            proc = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t:.2f}", "-i", str(path), "-frames:v", "1",
+                                   "-q:v", "2", "-f", "image2pipe", "-vcodec", "mjpeg", "-"], capture_output=True)
+            if proc.returncode != 0 or proc.stdout[:2] != b"\xff\xd8":
+                continue
+            jpg = proc.stdout
+            with _FRAME_LOCK:
+                _FRAME_CACHE[key] = jpg
+                while len(_FRAME_CACHE) > FRAME_CACHE_MAX:
+                    _FRAME_CACHE.popitem(last=False)
+        img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+        if img is not None:
+            out.append((round(float(t), 2), img))
+    return out
+
+
+def jpeg(img: Any, width: int, quality: int = 80) -> bytes:
+    import cv2
+    h, w = img.shape[:2]
+    if w != width:
+        img = cv2.resize(img, (width, max(2, int(round(h * width / w / 2)) * 2)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return buf.tobytes() if ok else b""
+
+
+def frames(path: Path, seconds: float, width: int = 360) -> List[Tuple[float, bytes]]:
+    out = []
+    for t, img in grab(path, frame_times(seconds)):
+        data = jpeg(img, width)
+        if data:
+            out.append((t, data))
     return out
 
 

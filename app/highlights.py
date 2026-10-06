@@ -626,9 +626,13 @@ Also write the post copy for each: a caption a creator would actually type, and 
 that describe what is in the clip rather than whatever is trending. Rewrite each hook for a \
 viewer who has never seen this video — who or what, in the first two seconds — and give one \
 plain headline for the video's premise. No emoji walls, no \
-"wait for it 😱", no ten generic tags."""
+"wait for it 😱", no ten generic tags.
 
-RERANK_PROMPT = """Video: {title}
+Each candidate says who speaks its key lines. A hook or caption may credit the creator with \
+words ("<creator> says…", "<creator>: …", "<creator>'s rule") ONLY when the speaker is the \
+creator; otherwise name the real speaker, or no one."""
+
+RERANK_PROMPT = """Video: {title}{creator_line}
 
 {candidates}
 
@@ -641,6 +645,7 @@ def rerank(
     segments: List[Dict[str, Any]],
     progress=None,
     guidance: str = "",
+    creator: str = "",
 ) -> List[Dict[str, Any]]:
     """Score every candidate against every other one, and write the post copy.
 
@@ -664,6 +669,8 @@ def rerank(
             f"({clip['end'] - clip['start']:.0f}s) first-pass score {clip.get('score', 50)}\n"
             f"    label: {clip.get('title', '')}\n"
             f"    first-pass note: {clip.get('reason', '')}\n"
+            f"    who speaks the key lines: {clip.get('speaker') or 'unclear'}"
+            + (f" ({clip['speaker_name']})" if clip.get("speaker_name") else "") + "\n"
             f"    transcript: {excerpt}"
         )
 
@@ -677,6 +684,7 @@ def rerank(
             tool_choice={"type": "tool", "name": "rank_clips"},
             messages=[{"role": "user", "content": RERANK_PROMPT.format(
                 title=title or "Untitled", candidates="\n\n".join(lines), count=len(clips),
+                creator_line=f"\nThe creator: {creator.strip()}" if (creator or "").strip() else "",
             ) + (CAMPAIGN_NOTE.format(guidance=guidance.strip()) if guidance.strip() else "")}],
         )
     except Exception:

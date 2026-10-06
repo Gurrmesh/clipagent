@@ -13,6 +13,7 @@ A clip comes out as one of:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -38,12 +39,13 @@ def _item(cid: str, label: str, status: str, detail: str = "") -> Dict[str, str]
 def summarize(checks: List[Dict[str, str]]) -> Dict[str, Any]:
     fails = [c for c in checks if c["status"] == "fail"]
     warns = [c for c in checks if c["status"] == "warn"]
+    # a check may carry a "short" line that says what's wrong better than its name does
     if fails:
         status = "blocked"
-        summary = "Blocked: " + "; ".join(c["label"].lower() for c in fails)
+        summary = "Blocked: " + "; ".join(c.get("short") or c["label"].lower() for c in fails)
     elif warns:
         status = "check"
-        summary = "Check before posting: " + "; ".join(c["label"].lower() for c in warns)
+        summary = "Check before posting: " + "; ".join(c.get("short") or c["label"].lower() for c in warns)
     else:
         status = "ready"
         summary = "Ready to post — every rule checked."
@@ -146,10 +148,295 @@ def _platform(r: Dict[str, Any], platform: str) -> Dict[str, str]:
     return _item("platform", "Where to post", "pass", campaign.PLATFORM_NAMES.get(platform, platform))
 
 
+# --- the campaign look: who is in it, logos, offensive words, AI footage (lookcheck.py) ------------
+
+def _short(item: Dict[str, str], short: str) -> Dict[str, str]:
+    if short:
+        item["short"] = short[:90]
+    return item
+
+
+def _pct(x: Optional[float]) -> str:
+    return f"{(x or 0) * 100:.0f}%"
+
+
+def _evidence(who: Dict[str, Any], name: str, other: str) -> str:
+    bits = []
+    if who.get("creator_share") is not None:
+        bit = f"{name} is on screen {_pct(who['creator_share'])} of the clip"
+        if who.get("creator_talk") is not None:
+            bit += f" and does {_pct(who['creator_talk'])} of the talking"
+        bits.append(bit)
+    if who.get("other_talk"):
+        bits.append(f"{other} does {_pct(who['other_talk'])} of the talking")
+    if who.get("local") == "offcam":
+        bits.append("most of the talking comes from someone off camera")
+    if who.get("conflict"):
+        bits.append(f"the face check and Claude disagree about which person is {name}")
+    how = {"faces": f"{name} recognised from the reference faces — an approximate match",
+           "context": "who is who worked out from the context"}.get(who.get("creator_how") or "")
+    if how and bits:
+        bits.append(how)
+    return "; ".join(bits)
+
+
+def _cant_tell(look: Dict[str, Any], name: str) -> str:
+    claude = look.get("claude") or {}
+    faces = look.get("faces") or {}
+    bits = []
+    if not claude.get("ran"):
+        bits.append(claude.get("why") or "Claude didn't look")
+    if not faces.get("ok"):
+        bits.append(faces.get("note") or "faces weren't looked for")
+    elif not (look.get("refs") or {}).get("photos") and not (look.get("refs") or {}).get("learned"):
+        bits.append(f"ClipAgent doesn't know what {name} looks like yet — add 1–3 clear photos of {name}'s face "
+                    "on the campaign page")
+    elif (look.get("match") or {}).get("status") == "unclear":
+        bits.append(f"nobody in the clip clearly matches {name}'s reference faces")
+    return "; ".join(bits) or "the signals were too weak"
+
+
+def _identity_check(r: Dict[str, Any], look: Dict[str, Any], hook: str, caption: str) -> Optional[Dict[str, str]]:
+    from . import highlights
+    who = look.get("who")
+    if not who:
+        return None
+    name = r["focus"] or r["creator"] or "the creator"
+    other = who.get("other_name") or "Someone else"
+    credits_now = bool(r["creator"]) and (highlights.credits_creator(hook, r["creator"])
+                                          or highlights.credits_creator(caption, r["creator"]))
+    hs = who.get("hook_speaker")
+    wrong_credit = credits_now and hs in ("other", "nobody_on_screen")
+    unsure_credit = credits_now and hs not in ("creator", "other", "nobody_on_screen")
+    fixed = [n for n in look.get("fixes") or [] if n.startswith("Rewrote the")]
+    evidence = _evidence(who, name, other)
+    credit_line = ""
+    if wrong_credit:
+        credit_line = f"The hook or caption credits {r['creator']} with words {other.lower() if other == 'Someone else' else other} says — change it."
+    elif unsure_credit:
+        credit_line = (f"The hook or caption says {r['creator']} said this, but it couldn't be confirmed that "
+                       f"{r['creator']} is the one talking ({_cant_tell(look, r['creator'])}).")
+    if r["focus"]:
+        label = "Main person on screen"
+        main = who.get("main")
+        if main == "creator":
+            item = _item("identity", label, "pass", f"{name} is the main person" + (f": {evidence}." if evidence else "."))
+        elif main == "other":
+            item = _short(_item("identity", label, "fail",
+                                f"{other} is the one talking in this clip, and the {r['campaign']} campaign needs "
+                                f"{name} to be the main person." + (f" ({evidence}.)" if evidence else "")),
+                          f"{other} is the main person, not {name}")
+            return item
+        elif main == "nobody":
+            item = _short(_item("identity", label, "warn",
+                                f"Nobody's face shows in this clip (a screen share or a chart?). The brief needs {name} "
+                                f"to be the main person — check it's {name} talking before posting."),
+                          "nobody on screen — check it's " + name)
+        elif main == "unknown":
+            item = _short(_item("identity", label, "warn",
+                                f"Couldn't check that {name} is the main person: {_cant_tell(look, name)}."),
+                          f"couldn't check {name} is the main person")
+        else:
+            item = _short(_item("identity", label, "warn",
+                                f"Couldn't tell for sure that {name} is the main person — "
+                                f"{evidence or _cant_tell(look, name)}. Watch it before posting."),
+                          f"not sure {name} is the main person")
+        if credit_line:
+            item["status"] = "warn" if item["status"] == "pass" else item["status"]
+            item["detail"] += " " + credit_line
+            if item["status"] == "warn" and not item.get("short"):
+                _short(item, f"hook credits {r['creator']} with someone else's words")
+        if fixed:
+            item["detail"] += " " + " ".join(f + "." for f in fixed)
+        return item
+    label = "Words credited to the right person"
+    if wrong_credit:
+        return _short(_item("identity", label, "warn", credit_line + (f" ({evidence}.)" if evidence else "")),
+                      f"hook credits {r['creator']} with someone else's words")
+    if unsure_credit:
+        return _short(_item("identity", label, "warn", credit_line + " Check before posting."),
+                      f"couldn't confirm {r['creator']} says the hook's words")
+    if fixed:
+        return _item("identity", label, "pass", "Fixed: " + " ".join(f + "." for f in fixed))
+    return _item("identity", label, "pass",
+                 "The hook and caption don't credit anyone with words they didn't say." if (hook or caption)
+                 else "No hook or caption words to check.")
+
+
+def _when(a: float, b: float) -> str:
+    from .lookcheck import mmss
+    return f"at {mmss(a)}" if b - a < 1.0 else f"from {mmss(a)} to {mmss(b)}"
+
+
+def _where(where: str) -> str:
+    where = (where or "").strip().rstrip(".")
+    if not where:
+        return ""
+    return f" in the {where}" if re.match(r"(top|bottom|middle|centre|center|left|right|upper|lower)", where, re.I) \
+        else f" {where}"
+
+
+def _spoken(look: Dict[str, Any], key_local: str, key_claude: str) -> List[Dict[str, Any]]:
+    """Phrases heard, from the word lists and from Claude, without saying one twice."""
+    out: List[Dict[str, Any]] = []
+    for x in ((look.get("local") or {}).get(key_local) or []) + ((look.get("claude") or {}).get(key_claude) or []):
+        if not any(abs(float(x.get("at") or 0) - float(o.get("at") or 0)) < 1.5 for o in out):
+            out.append({"quote": x.get("quote") or "", "at": float(x.get("at") or 0)})
+    return out
+
+
+def _logos_check(r: Dict[str, Any], look: Dict[str, Any], kind: str) -> Optional[Dict[str, str]]:
+    from .lookcheck import mmss
+    if not r["no_logos"]:
+        return None
+    label = "Logos and sponsor banners"
+    claude = look.get("claude") or {}
+    seen = [x for x in claude.get("logos") or [] if x.get("kind") != "drawn_by_clipagent"]
+    own = [x for x in seen if x.get("kind") == "campaign_own"]
+    banned = [x for x in seen if x.get("kind") != "campaign_own"]
+    exempt = r["brand_logo"] in ("required", "allowed") or (kind == "overlay" and r["brand_logo"] != "forbidden")
+    spoken = _spoken(look, "promos", "spoken_promos")
+    said = (f" Someone says “{spoken[0]['quote']}” at {mmss(spoken[0]['at'])} — a spoken promo." if spoken else "")
+    if banned:
+        lines = [f"{x['what'][:1].upper() + x['what'][1:]} shows{_where(x.get('where'))} {_when(x['from'], x['to'])}"
+                 for x in banned[:3]]
+        more = f" (and {len(banned) - 3} more)" if len(banned) > 3 else ""
+        quote = f" The brief: “{r['no_logos_quote'][:120]}”" if r["no_logos_quote"] else ""
+        return _short(_item("logos", label, "fail", "; ".join(lines) + more + "." + quote), lines[0])
+    if own and not exempt:
+        x = own[0]
+        return _short(_item("logos", label, "warn",
+                            f"{x['what'][:1].upper() + x['what'][1:]} shows{_where(x.get('where'))} "
+                            f"{_when(x['from'], x['to'])}. The brief says no logos — check whether "
+                            f"{r['creator'] or 'the brand'}'s own logo counts." + said),
+                      "the campaign's own logo shows — check the brief allows it")
+    if not claude.get("ran"):
+        return _short(_item("logos", label, "warn",
+                            f"Couldn't look at the picture for logos, sponsor banners or promo codes — "
+                            f"{claude.get('why') or 'Claude did not look'}. Look through it before posting."
+                            + (said or (" No promo codes are said in it." if kind != "overlay" else ""))),
+                      "logos and banners not checked")
+    if spoken:
+        return _short(_item("logos", label, "warn", said.strip() + " The brief bans promotions — check before posting."),
+                      f"a spoken promo at {mmss(spoken[0]['at'])}")
+    return _item("logos", label, "pass", f"No logos, sponsor banners, promo codes or watermarks seen in "
+                                         f"{look.get('frames') or 'the'} frames" +
+                 (", and none said." if kind != "overlay" else "."))
+
+
+def _ai_check(r: Dict[str, Any], look: Dict[str, Any], kind: str) -> Optional[Dict[str, str]]:
+    from .lookcheck import mmss
+    if not r["no_ai"]:
+        return None
+    label = "AI-made footage"
+    claude = look.get("claude") or {}
+    shown = claude.get("ai_visuals") or []
+    spoken = _spoken(look, "ai", "ai_mentions")
+    if shown:
+        x = shown[0]
+        quote = f" The brief: “{r['no_ai_quote'][:120]}”" if r["no_ai_quote"] else " The brief bans AI-generated video."
+        return _short(_item("ai_footage", label, "fail",
+                            f"AI-made footage shows {_when(x['from'], x['to'])} ({x['what']}).{quote}"),
+                      f"AI-made footage {_when(x['from'], x['to'])}")
+    if not claude.get("ran"):
+        said = (f" AI is mentioned at {mmss(spoken[0]['at'])} (“{spoken[0]['quote']}”)." if spoken else "")
+        return _short(_item("ai_footage", label, "warn",
+                            f"Couldn't look at the picture for AI-made footage — {claude.get('why') or 'Claude did not look'}."
+                            + said + " Look through it before posting."), "AI footage not checked")
+    if spoken:
+        return _short(_item("ai_footage", label, "warn",
+                            f"AI video is mentioned at {mmss(spoken[0]['at'])} (“{spoken[0]['quote']}”) but none was "
+                            "seen in the frames — check it before posting."), "AI mentioned — check the footage")
+    return _item("ai_footage", label, "pass", "No AI-made visuals seen" + (", and none mentioned." if kind != "overlay"
+                                                                           else "."))
+
+
+def _offensive_check(r: Dict[str, Any], look: Dict[str, Any], edits: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    from .lookcheck import mmss
+    if look.get("kind") == "overlay":
+        return None
+    label = "Offensive or negative content"
+    claude = look.get("claude") or {}
+    found = look.get("offensive") or []
+    applied = [list(map(float, c)) for c in ((edits or {}).get("cut_applied") or [])]
+
+    def was_cut(f: Dict[str, Any]) -> bool:
+        src = f.get("src")
+        return bool(src) and any(abs(a - src[0]) < 0.06 and abs(b - src[1]) < 0.06 for a, b in applied)
+
+    left = [f for f in found if not was_cut(f)]
+    name = r["creator"] or "the creator"
+    if left:
+        f = left[0]
+        what = "An offensive joke" if f["kind"] == "offensive_joke" else "An offensive word"
+        why = f["why_not"] or "it wasn't cut out"
+        bad = (f" It's said by {name}, so it would also show {name} in a bad light — the brief: “{r['negative'][:100]}”."
+               if r["negative"] and f.get("said_by") == "creator" else "")
+        return _short(_item("offensive", label, "fail",
+                            f"{what} (“{f['quote']}”) {_when(f['from'], f['to'])} can't be cut out: {why}.{bad} "
+                            "Pick another moment, or download anyway if you're sure."
+                            + (f" ({len(left) - 1} more found.)" if len(left) > 1 else "")),
+                      f"{what.lower()} {_when(f['from'], f['to'])}")
+    if claude.get("bad_light") and r["negative"]:
+        return _short(_item("offensive", label, "fail",
+                            f"This clip shows {name} in a bad light ({claude.get('bad_light_why') or 'Claude flagged it'}) "
+                            f"— the brief: “{r['negative'][:120]}”."), f"shows {name} in a bad light")
+    if found:
+        return _item("offensive", label, "pass", "Cut out " + ", ".join(
+            f"{'an offensive joke' if f['kind'] == 'offensive_joke' else 'an offensive word'} at {mmss(f['from'])}"
+            for f in found) + ".")
+    if not claude.get("ran"):
+        return _short(_item("offensive", label, "warn",
+                            f"Only checked the words for the most common slurs ({claude.get('why') or 'Claude did not look'})"
+                            " — not for offensive jokes. Listen to it before posting."), "only checked for common slurs")
+    return _item("offensive", label, "pass", "No slurs or offensive jokes in what's said.")
+
+
+def look_checks(rb: Dict[str, Any], look: Optional[Dict[str, Any]], *, kind: str = "clip", hook: str = "",
+                caption: str = "", edits: Optional[Dict[str, Any]] = None,
+                spans: Optional[List[Any]] = None) -> List[Dict[str, str]]:
+    """The look's findings as check lines: identity, logos, offensive, ai_footage. Anything that
+    couldn't be looked at says so (Check first) — it never counts as a pass."""
+    from . import lookcheck
+    r = lookcheck.rules_of(rb)
+    if not isinstance(look, dict) or not look:
+        out = []
+        if r["focus"] and kind != "overlay":
+            out.append(_short(_item("identity", "Main person on screen", "warn",
+                                    f"Not checked: who is on screen and talking wasn't looked at for this clip — make "
+                                    f"sure {r['focus']} is the main person before posting."),
+                              f"not checked that {r['focus']} is the main person"))
+        if r["no_logos"]:
+            out.append(_short(_item("logos", "Logos and sponsor banners", "warn",
+                                    "Not checked: nobody looked at this clip for logos, sponsor banners or promo codes."),
+                              "logos and banners not checked"))
+        if r["no_ai"]:
+            out.append(_short(_item("ai_footage", "AI-made footage", "warn",
+                                    "Not checked: nobody looked at this clip for AI-made footage."),
+                              "AI footage not checked"))
+        return out
+    items = [x for x in (_identity_check(r, look, hook, caption) if kind != "overlay" else None,
+                         _logos_check(r, look, kind), _offensive_check(r, look, edits), _ai_check(r, look, kind)) if x]
+    missed = lookcheck.uncovered(look, spans) if spans else 0.0
+    if missed > 0.5:
+        note = f" ({missed:.0f}s of this version were added after the check and weren't looked at.)"
+        for it in items:
+            it["detail"] += note
+            if missed > lookcheck.UNCHECKED_OK and it["status"] == "pass":
+                it["status"] = "warn"
+    if look.get("fix_error"):
+        for it in items:
+            if it["status"] != "pass":
+                it["detail"] += f" {look['fix_error']}"
+    return items
+
+
 def check_overlay(rb: Dict[str, Any], source: Path, output: Path, made: Dict[str, Any],
                   post: Dict[str, Any], hook: str, tone: Optional[Dict[str, str]],
-                  src_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """A clip-bank clip: the footage, sound and length must be the source's own."""
+                  src_info: Optional[Dict[str, Any]] = None,
+                  look: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """A clip-bank clip: the footage, sound and length must be the source's own.
+    `look` (lookcheck.review_overlay) adds what the brief bans in the picture."""
     r = campaign.resolve(rb)
     a = r["allowed"]
     checks: List[Dict[str, str]] = []
@@ -246,6 +533,7 @@ def check_overlay(rb: Dict[str, Any], source: Path, output: Path, made: Dict[str
     checks += _caption(r, post)
     checks.append(_platform(r, post.get("platform", "")))
     checks.append(_tone(tone, hook))
+    checks += look_checks(rb, look, kind="overlay", hook=hook)
     result = summarize(checks)
     result["measured"] = {"frames": f_out, "frames_source": f_in, "duration": round(out["duration"], 3),
                           "psnr_min": psnr, "psnr": drift.get("psnr"), "hook_area": drift.get("covered"),
@@ -317,6 +605,10 @@ def check_source(rb: Dict[str, Any], clip: Dict[str, Any], edits: Dict[str, Any]
     checks += _caption(r, post)
     checks.append(_platform(r, post.get("platform", "")))
     checks.append(_tone(tone, hook if edits.get("hook_on", True) else ""))
+    # what the campaign look found (kept with the clip by lookcheck.review_clip)
+    from . import lookcheck
+    checks += look_checks(rb, edits.get("campaign_look"), kind="clip", hook=lookcheck._on_screen(edits),
+                          caption=post.get("caption") or "", edits=edits, spans=lookcheck.clip_spans(clip))
     result = summarize(checks)
     result["measured"] = {"duration": round(seconds, 3)}
     return result
@@ -378,6 +670,14 @@ def check_edit(rb: Dict[str, Any], timeline: Dict[str, Any], output: Path, post:
         checks.append(logo)
     checks += _caption(r, post)
     checks.append(_tone(tone, hook))
+    # the campaign look: who is in it, logos and banners, offensive words, AI footage
+    from . import lookcheck
+    try:
+        look = lookcheck.review_edit(rb, timeline, output, hook, post)
+    except Exception as exc:                           # a look that couldn't run is a flag, not a pass
+        look = {"kind": "edit", "claude": {"ran": False, "why": str(exc)[:140]}, "faces": {"ok": False}}
+    checks += look_checks(rb, look, kind="edit", hook=hook, caption=(post or {}).get("caption") or "")
     result = summarize(checks)
     result["measured"] = {"duration": round(seconds, 3)}
+    result["look"] = {"who": look.get("who"), "faces": look.get("faces")}
     return result
