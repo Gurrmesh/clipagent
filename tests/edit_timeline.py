@@ -7,6 +7,10 @@ hit on the drop, end on a bar line at the asked length, and that speech
 edits keep every sentence whole while still cutting on the beat. Also:
 moments off / reordered, plain errors, speed curves, and Claude's picks
 being checked (numbers he never said, duplicates, one drop).
+Moment lengths: every style × 15/20/30/60 s fed 12–28 s moments — each one cut
+to its style's window on word boundaries (whole thoughts in voice styles), the
+whole edit within ±15 % of the length asked; too-short moments left out with a
+note, no-words moments, key lines, sizes set by hand, campaign length limits.
 """
 from __future__ import annotations
 

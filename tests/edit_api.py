@@ -7,7 +7,10 @@ Velocity edit made end to end (Telegram gets it), re-make without Claude,
 undo, typed changes, versions with another song, the campaign rules (music
 and joining moments refused in plain words, speed changes switched off,
 #hashtags added, a too-long edit blocked from download), Telegram /edit,
-delete, and edits cut off by a restart.
+delete, and edits cut off by a restart. Also moment lengths: a Funny edit's
+long picks cut to 3–8 s, and typed / by-hand size changes (shorter, longer,
+trim the start, end on his words, the whole length) that stay within the
+length budget and can be undone.
 """
 from __future__ import annotations
 
