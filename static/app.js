@@ -780,8 +780,9 @@ function judgeTable(c) {
 function campaignCheckHTML(c) {
   const g = c.compliance;
   if (!g) return '';
-  const items = (g.checks || []).filter(ch => ch.status !== 'pass')
-    .map(ch => `<li class="${ch.status === 'fail' ? 'fail' : 'warn'}">${esc(ch.label)}${ch.detail ? ` — ${esc(ch.detail)}` : ''}</li>`);
+  // problems, plus what the campaign look fixed on its own ("Fixed: …", "Cut out …")
+  const items = (g.checks || []).filter(ch => ch.status !== 'pass' || /^(Fixed|Cut out)/.test(ch.detail || ''))
+    .map(ch => `<li class="${ch.status === 'fail' ? 'fail' : ch.status === 'pass' ? 'fixed' : 'warn'}">${esc(ch.label)}${ch.detail ? ` — ${esc(ch.detail)}` : ''}</li>`);
   if (!items.length) items.push('<li>Follows every rule in the brief.</li>');
   return `<div class="doc-report"><div class="head"><span>Campaign check: ${GATE_LABEL[g.status] || g.status}</span></div><ul>${items.join('')}</ul></div>`;
 }
@@ -1650,12 +1651,54 @@ $('cu-logo-del').addEventListener('click', async () => {
   catch (err) { toast(err.message, true); }
 });
 
+/* "Who is TJR?" — photos for the check that the creator is the one on screen and talking */
+function whoName(c) {
+  const rb = (c && c.rulebook) || {};
+  return ((rb.primary_focus || {}).name || rb.creator || rb.brand || '').trim() || 'the creator';
+}
+async function renderWho(c) {
+  const box = $('cu-who');
+  box.classList.toggle('hidden', !c || c.mode === 'overlay');
+  if (!c || c.mode === 'overlay') return;
+  const name = whoName(c), focus = !!(((c.rulebook || {}).primary_focus || {}).name);
+  $('cu-who-title').textContent = `Who is ${name}?`;
+  let st = null;
+  try { st = await api(`/api/campaigns/${c.id}/identity`); } catch { /* the row just stays plain */ }
+  if (!st || !CAMP.use || CAMP.use.id !== c.id) return;
+  $('cu-who-photos').innerHTML = st.photos.map(p => `<button type="button" class="bl-thumb who-photo" style="border:0;padding:0;cursor:pointer" data-n="${esc(p.name)}" title="Remove this photo" aria-label="Remove this photo of ${esc(name)}"><img src="${esc(p.url)}" alt="${esc(name)}"></button>`).join('');
+  $('cu-who-need').textContent = st.ready
+    ? `ClipAgent checks ${name} is the one on screen and talking in every clip${focus ? ' — the brief needs that' : ''}.`
+    : `Add 1–3 clear photos of ${name}'s face, so ClipAgent can check ${name} is the one on screen and talking in every clip.`;
+  $('cu-who-more').textContent = st.note + (st.approximate ? ' The face match is approximate, so Claude also works out who is who from what is said.' : '');
+  $('cu-who-add').textContent = st.photos.length ? 'Add another' : 'Add photos';
+  $('cu-who-add').disabled = st.photos.length >= 3;
+  box.classList.toggle('need', focus && !st.ready);
+  $('cu-who-photos').querySelectorAll('.who-photo').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('Remove this photo?')) return;
+    try { await api(`/api/campaigns/${c.id}/identity/photo/${encodeURIComponent(b.dataset.n)}`, { method: 'DELETE' }); toast('Photo removed'); renderWho(c); }
+    catch (err) { toast(err.message, true); }
+  }));
+}
+$('cu-who-add').addEventListener('click', () => $('cu-who-file').click());
+$('cu-who-file').addEventListener('change', async ev => {
+  const files = [...ev.target.files].slice(0, 3); ev.target.value = '';
+  const c = CAMP.use;
+  if (!files.length || !c) return;
+  for (const f of files) {
+    const form = new FormData(); form.append('file', f);
+    try { await api(`/api/campaigns/${c.id}/identity/photo`, { method: 'POST', body: form }); toast(`Photo of ${whoName(c)} added`); }
+    catch (err) { toast(err.message, true); break; }
+  }
+  renderWho(c);
+});
+
 async function campUse(c) {
   CAMP.use = c; CAMP.files = []; clearSrcFile();
   $('cu-name').textContent = c.name;
   $('cu-mode').textContent = modeLabel(c.mode);
   $('cu-chips').innerHTML = ruleChips(c.card);
   renderLogo(c);
+  renderWho(c);
   $('cu-overlay').classList.toggle('hidden', c.mode !== 'overlay');
   $('cu-source').classList.toggle('hidden', c.mode === 'overlay');
   $('cu-dropname').textContent = 'As many as you like';

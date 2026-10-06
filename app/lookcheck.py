@@ -558,6 +558,9 @@ def _who(r: Dict[str, Any], scan: Dict[str, Any], match: Dict[str, Any], claude:
         main = "unclear" if cl_main == "creator" else "other"
     elif local == "nobody":
         main = "nobody"
+    elif local == "offcam":
+        # the faces on screen aren't the ones talking: Claude's 8 frames can't overrule that
+        main = "other" if cl_main == "other" else "unclear"
     elif cl_main in ("creator", "other", "nobody"):
         main = cl_main
         if main == "creator" and how != "faces":

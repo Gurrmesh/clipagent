@@ -646,7 +646,7 @@ def _face_in_photo(img: np.ndarray) -> Tuple[Optional[np.ndarray], str]:
         img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     faces = detect(img)
     if not faces:
-        return None, "Couldn't find a face in that photo — use a clear photo where his face is easy to see."
+        return None, "Couldn't find a face in that photo — use a clear photo where the face is easy to see."
     row = max(faces, key=lambda r: float(r[2] * r[3]))
     if row[2] < 40:
         return None, "The face in that photo is too small — use a closer photo of the face."
@@ -772,7 +772,7 @@ def status(campaign_id: str) -> Dict[str, Any]:
         note = ("Seen in a solo clip, but not yet in two different videos — not trusted yet. "
                 "Adding photos makes the check work right away.")
     else:
-        note = "Doesn't know the face yet. Add photos, or it learns from clips where only he or she is on screen."
+        note = "Doesn't know the face yet. Add photos, or it learns from clips where only that person is on screen."
     return {"photos": pics, "learned": refs["learned"], "videos": refs["videos"], "seen": refs["seen"],
             "ready": bool(refs["photos"] or refs["learned"]), "kind": kind(), "note": note,
             "approximate": kind() != "sface"}
