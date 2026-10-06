@@ -227,6 +227,38 @@ def timeline_from_segments(segments: Sequence[Tuple[float, float]], fps: Fractio
     return Timeline(fps=fps, segments=spans)
 
 
+def split_at(tl: Timeline, n: int) -> Tuple[Timeline, int]:
+    """The same timeline with a segment boundary at output frame `n`, and how
+    many segments play before it (where something can be slotted in)."""
+    segs: List[Tuple[int, int]] = []
+    out, before = 0, None
+    for s, e in tl.segments:
+        if before is None and out < n < out + (e - s):
+            cut = s + (n - out)
+            segs += [(s, cut), (cut, e)]
+            before = len(segs) - 1
+        else:
+            segs.append((s, e))
+            if before is None and out + (e - s) == n:
+                before = len(segs)
+        out += e - s
+    return Timeline(fps=tl.fps, segments=segs), (before if before is not None else len(segs))
+
+
+def with_overrides(tl: Timeline, overrides: Sequence[Tuple[int, int, int]]) -> Timeline:
+    """The picture's own timeline: `tl` (which the sound keeps following) with
+    output frames [n0, n1) showing source frames from s0 on instead — a
+    video-only insert, B-roll style. Same length, so picture and sound stay
+    locked everywhere else."""
+    idx = tl.src_index().copy()
+    for n0, n1, s0 in overrides:
+        idx[n0:n1] = np.arange(s0, s0 + (n1 - n0))
+    breaks = np.flatnonzero(np.diff(idx) != 1) + 1
+    starts = np.concatenate([[0], breaks]).astype(np.int64)
+    ends = np.concatenate([breaks, [len(idx)]]).astype(np.int64)
+    return Timeline(fps=tl.fps, segments=[(int(idx[a]), int(idx[b - 1]) + 1) for a, b in zip(starts, ends)])
+
+
 # --- decoding -------------------------------------------------------------------
 
 class _Decoder:
@@ -1018,6 +1050,34 @@ def _stack_base(an: "Analysis", size: Tuple[int, int]) -> Optional[Dict[str, Any
             "top_h": STACK_H, "bot_h": OH - STACK_H, "kind": kind}
 
 
+FIT_PUSH = 0.04            # a proof shot shown whole creeps in this much, so it never looks frozen
+
+
+def _rewind_frames(cv2, ring: List[_Frame], count: int):
+    """The teaser's rewind: its last frames played backwards at speed, each
+    one blended with the next and softened (motion blur), a little darker and
+    paler, with a ◀◀ mark in the middle — then the story starts."""
+    if not ring:
+        return
+    seq = ring[::-1]
+    cx, cy, size = OW // 2, int(OH * 0.42), 46
+    marks = [np.array([[cx - 6 + dx, cy - size], [cx - 6 + dx, cy + size], [cx - 6 + dx - int(size * 1.15), cy]],
+                      np.int32) for dx in (int(size * 1.15) - 4, 0)]
+    for j in range(count):
+        a, b = seq[min(j, len(seq) - 1)], seq[min(j + 1, len(seq) - 1)]
+        y = cv2.GaussianBlur(cv2.addWeighted(a.y, 0.5, b.y, 0.5, 0), (0, 0), 2.2)
+        u = cv2.GaussianBlur(cv2.addWeighted(a.u, 0.5, b.u, 0.5, 0), (0, 0), 1.1)
+        v = cv2.GaussianBlur(cv2.addWeighted(a.v, 0.5, b.v, 0.5, 0), (0, 0), 1.1)
+        y = cv2.convertScaleAbs(y, alpha=0.86)
+        u = cv2.addWeighted(u, 0.55, np.full_like(u, 128), 0.45, 0)
+        v = cv2.addWeighted(v, 0.55, np.full_like(v, 128), 0.45, 0)
+        for poly in marks:
+            cv2.fillPoly(y, [poly], 235, lineType=cv2.LINE_AA)
+            cv2.fillPoly(u, [poly // 2], 128)
+            cv2.fillPoly(v, [poly // 2], 128)
+        yield _Frame(y, u, v)
+
+
 def _compose(warper: _Warper, layout: str, base, fr: _Frame) -> _Frame:
     cv2 = warper.cv2
     if layout in ("split", "stack"):
@@ -1036,12 +1096,23 @@ def _compose(warper: _Warper, layout: str, base, fr: _Frame) -> _Frame:
 
 # --- audio --------------------------------------------------------------------------
 
-def _audio_graph(tl: Timeline, labels: Sequence[str]) -> str:
+def _rewind_sound(seconds: float) -> str:
+    """A short tape-rewind whirr, made here from a formula (nothing downloaded):
+    fast falling chirps with a flutter, faded in and out."""
+    d = max(0.05, seconds)
+    return (f"aevalsrc=0.30*sin(2*PI*(2400*t-1800*t*t/{d:.4f}))*(0.55+0.45*sin(2*PI*38*t))"
+            f"*sin(PI*t/{d:.4f}):s=48000:d={d + 0.05:.4f}")
+
+
+def _audio_graph(tl: Timeline, labels: Sequence[str],
+                 gap: Optional[Tuple[int, float, bool]] = None) -> str:
     """Cut the source audio at exactly the video's frame boundaries.
 
     `labels` holds one audio input per decode run, each opened with its own
     seek to that run's first frame, so a stitched clip never has to read the
-    minutes between its parts."""
+    minutes between its parts. `gap` = (segments before it, seconds, sound):
+    a stretch with no source audio — the teaser's rewind — slotted in there,
+    silent or with the rewind sound."""
     parts = []
     names = []
     fade = 0.008
@@ -1059,6 +1130,11 @@ def _audio_graph(tl: Timeline, labels: Sequence[str]) -> str:
             )
             names.append(f"[s{k}]")
     names.sort(key=lambda x: int(x[2:-1]))              # play order
+    if gap and gap[1] > 0:
+        before, secs, sound = gap
+        src = _rewind_sound(secs) if sound else f"aevalsrc=0:s=48000:d={secs + 0.05:.4f}"
+        parts.append(f"{src},atrim=end={secs:.6f},asetpts=PTS-STARTPTS[sgap]")
+        names.insert(max(0, min(len(names), before)), "[sgap]")
     if len(names) == 1:
         parts.append(f"{names[0]}anull[acut]")
     else:
@@ -1172,10 +1248,22 @@ def render_clip(
     debug: bool = False,
     segments: Optional[List[Tuple[float, float]]] = None,
     labels: Optional[List[Tuple[float, str]]] = None,
+    video_overrides: Optional[List[Tuple]] = None,
+    rewind: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Render one clip. `segments` (absolute seconds, in play order) replaces
     start/end/keep for a stitched clip; `labels` are (output seconds, text)
-    marks for its jumps in time."""
+    marks for its jumps in time.
+
+    Smart Stitch extras (app/smartstitch.py):
+    `video_overrides` [(out_start, out_end, src_start[, fit])] — the picture
+      shows source time src_start on for that stretch of the clip while the
+      sound keeps following the segments (a proof shot over his voice). With
+      `fit`, that stretch is shown whole over a blurred copy of itself, so a
+      chart stays readable instead of being cropped to a face.
+    `rewind` {"after": output seconds, "seconds": length, "sound": bool} — a
+      quick fast-reverse of the last frames before `after` (the teaser), made
+      here, with silence under it, or a rewind sound when `sound` is set."""
     import cv2
 
     W, H = int(source_size[0]), int(source_size[1])
@@ -1185,23 +1273,53 @@ def render_clip(
     fps = frame_rate(source)
     vfr = _is_vfr(source)
     tl = timeline_from_segments(segments, fps) if segments else build_timeline(start, end, keep, fps)
-    runs = tl.runs()
+    # The rewind: frames drawn here after the teaser's last frame, while the
+    # sound has a matching gap — so everything after it stays in sync.
+    rw_at = rw_n = gap_before = 0
+    if rewind and float(rewind.get("seconds") or 0) > 0:
+        rw_at = int(round(Fraction(float(rewind.get("after") or 0)) * fps))
+        rw_n = max(1, int(round(Fraction(float(rewind["seconds"])) * fps)))
+        if 2 <= rw_at < tl.total:
+            tl, gap_before = split_at(tl, rw_at)
+        else:
+            rw_at = rw_n = 0
     N = tl.total
+    # Video-only inserts: the picture's own timeline, the same length as the sound's.
+    ov_frames: List[Tuple[int, int, int]] = []
+    fit = np.zeros(N, bool)
+    fit_u = np.zeros(N)
+    for item in sorted(video_overrides or [], key=lambda o: float(o[0])):
+        n0 = int(round(Fraction(float(item[0])) * fps))
+        n1 = n0 + int(round(Fraction(float(item[1]) - float(item[0])) * fps))
+        s0 = int(round(Fraction(float(item[2])) * fps))
+        if rw_n:
+            if n0 < rw_at + rw_n:
+                continue                       # never over the teaser or its rewind
+            n0, n1 = n0 - rw_n, n1 - rw_n
+        n1 = min(N, n1)
+        if n1 - n0 < 2 or s0 < 0 or n0 < 0 or (ov_frames and n0 < ov_frames[-1][1]):
+            continue
+        ov_frames.append((n0, n1, s0))
+        if len(item) > 3 and item[3]:
+            fit[n0:n1] = True
+            fit_u[n0:n1] = np.linspace(0.0, 1.0, n1 - n0)
+    vtl = with_overrides(tl, ov_frames) if ov_frames else tl
+    runs = vtl.runs()
     fps_str = f"{fps.numerator}/{fps.denominator}"
 
     want_faces = (layout == "stack") or layout == "fill" and bool(edits.get("auto_frame", True)) \
         and edits.get("crop_auto", True) is not False
-    an = analyse(source, tl, (W, H), want_faces=want_faces, vfr=vfr)
+    an = analyse(source, vtl, (W, H), want_faces=want_faces, vfr=vfr)
     stack_base = _stack_base(an, (W, H)) if layout == "stack" else None
     stack_refused = layout == "stack" and stack_base is None
     if stack_refused:
         layout = "fill"                    # this clip doesn't suit a stack: follow the speaker instead
     energy = _energy(source, tl) if (has_audio and edits.get("motion", True)) else None
-    cam = plan_camera(tl, an, (W, H), edits, layout, energy)
+    cam = plan_camera(vtl, an, (W, H), edits, layout, energy)
     cw = H * 9 / 16 if W / H >= 9 / 16 else float(W)
 
     # --- captions and hook -------------------------------------------------------
-    out_duration = float(Fraction(N) / fps)
+    out_duration = float(Fraction(N + rw_n) / fps)
     show_captions = bool(edits.get("captions_on", True)) and bool(words)
     hook_text = edits.get("hook", "") if edits.get("hook_on", True) else ""
     headline = edits.get("headline", "") if edits.get("headline_on", True) else ""
@@ -1221,7 +1339,7 @@ def render_clip(
             hook_top = int(edits["hook_y"])          # placed by hand, or by the clip doctor
         elif hook_text.strip() and layout == "fill":
             hook_top = _hook_clear_top(
-                cam, an, tl, (W, H), 2.4, captions.HOOK_TOP + offset,
+                cam, an, vtl, (W, H), 2.4, captions.HOOK_TOP + offset,
                 captions.hook_block(hook_text, edits.get("caption_style", "impact"),
                                     float(edits.get("caption_size", 1.0))),
                 captions.caption_top(edits.get("caption_position", "bottom"),
@@ -1261,7 +1379,7 @@ def render_clip(
         y = int(card["y"]) if card.get("y") is not None else captions.HOOK_TOP + top_off
         if card.get("y") is None and layout == "fill":
             # Same rule as the hook: never over a face's eyes in the opening.
-            moved = _hook_clear_top(cam, an, tl, (W, H), 2.4, y, made["h"],
+            moved = _hook_clear_top(cam, an, vtl, (W, H), 2.4, y, made["h"],
                                     captions.caption_top(edits.get("caption_position", "bottom"),
                                                          edits.get("caption_style", "impact"),
                                                          float(edits.get("caption_size", 1.0))) - 20)
@@ -1292,7 +1410,9 @@ def render_clip(
         vout = "[vcamp]"
         next_input += 1
     if audio_labels:
-        graph.append(_audio_graph(tl, audio_labels))
+        graph.append(_audio_graph(tl, audio_labels,
+                                  (gap_before, float(Fraction(rw_n) / fps), bool((rewind or {}).get("sound")))
+                                  if rw_n else None))
         if edits.get("normalize_audio", True):
             gain = _loudness_gain(source, tl)
             # level=false: no automatic make-up gain; latency=true: the limiter's
@@ -1342,6 +1462,24 @@ def render_clip(
         for plane in (out.y, out.u, out.v):
             enc.stdin.write(np.ascontiguousarray(plane).data)
 
+    # The rewind replays the teaser's last ~1.2 s backwards at speed, so those
+    # frames are kept as they go out (every `stride`-th one).
+    rw_span = min(rw_at, 3 * rw_n) if rw_n else 0
+    rw_stride = max(1, rw_span // max(1, rw_n)) if rw_n else 1
+    ring: List[_Frame] = []
+
+    def keep_for_rewind(out: _Frame, n: int) -> None:
+        if rw_n and rw_at - rw_span <= n < rw_at and (rw_at - 1 - n) % rw_stride == 0:
+            ring.append(_Frame(out.y.copy(), out.u.copy(), out.v.copy()))
+
+    def play_rewind() -> None:
+        for fr in _rewind_frames(cv2, ring, rw_n):
+            emit(fr)
+        ring.clear()
+
+    fit_base = _layout_base("blur", (W, H), {}) if fit.any() else None
+    fit_push = FIT_PUSH if edits.get("motion", True) else 0.0
+
     dec: Optional[_Decoder] = None
     try:
         due = 0
@@ -1349,7 +1487,7 @@ def render_clip(
             count = run.last - run.first
             keep_mask = np.zeros(count, bool)
             for i in run.segs:
-                s_, e_ = tl.segments[i]
+                s_, e_ = vtl.segments[i]
                 keep_mask[s_ - run.first:e_ - run.first] = True
             due += int(keep_mask.sum())
             dec = _Decoder(source, run.first, count, fps, (W, H), "yuv420p", vfr=vfr, native=(W, H))
@@ -1363,6 +1501,19 @@ def render_clip(
                     continue
                 n = written
                 src = _planes(buf, W, H)
+                if fit[n]:
+                    # A screen share shown whole over a blurred copy of itself:
+                    # the chart stays readable, never cropped to a face.
+                    out = _compose(warper, "blur", fit_base, src)
+                    if fit_push:
+                        out = warper.warp(out, _camera_affine(1.0 + fit_push * float(fit_u[n]), 0.0, 0.0, 0.0))
+                    emit(out)
+                    last_frame = out
+                    keep_for_rewind(out, n)
+                    written += 1
+                    if rw_n and written == rw_at:
+                        play_rewind()
+                    continue
                 if layout != "fill":
                     src = _compose(warper, layout, base, src)
                 cur = state(n)
@@ -1388,14 +1539,20 @@ def render_clip(
                                 [cv2.IMWRITE_JPEG_QUALITY, 88])
                 emit(out)
                 last_frame = out          # only reused before the next decode, so no copy
+                keep_for_rewind(out, n)
                 written += 1
+                if rw_n and written == rw_at:
+                    play_rewind()
             dec.close()
             dec = None
             # A part that ends early in the source: hold its last frame, so the
             # picture of every later part still lines up with its sound.
             while last_frame is not None and written < due:
                 emit(last_frame)
+                keep_for_rewind(last_frame, written)
                 written += 1
+                if rw_n and written == rw_at:
+                    play_rewind()
         enc.stdin.close()
     except (BrokenPipeError, OSError):
         pass
@@ -1419,6 +1576,8 @@ def render_clip(
 
     st = cam.stats
     st["parts"] = len(runs)
+    st["inserts"] = len(ov_frames)
+    st["rewind_frames"] = rw_n
     manual = edits.get("crop_auto", True) is False or not edits.get("auto_frame", True)
     if layout == "stack":
         kind = "static"
@@ -1446,12 +1605,12 @@ def render_clip(
     if stack_refused:
         note = "Stacked split didn't suit this clip (close-ups or changing angles) — " + note[0].lower() + note[1:]
     step = max(1, int(float(fps) / 2))
-    src_idx = tl.src_index()
+    src_idx = vtl.src_index()
     track = [(float(Fraction(int(src_idx[n])) / fps), float(cam.cx[n] / W)) for n in range(0, N, step)]
     result_plan = FramingPlan(kind=kind, facecam=plan.facecam if plan else None, track=track,
                               confidence=1.0 if st["tracked"] else 0.0, note=note)
     result: Dict[str, Any] = {"file": out_file, "thumb": thumb, "clean": clean_path,
-                              "plan": result_plan, "stats": st, "frames": N}
+                              "plan": result_plan, "stats": st, "frames": N + rw_n}
     if debug:
         result["camera"] = cam
         result["timeline"] = tl

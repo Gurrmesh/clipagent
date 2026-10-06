@@ -220,12 +220,17 @@ def render_clip(
     keep: List[tuple[float, float]] | None = None,
     segments: List[tuple[float, float]] | None = None,
     labels: List[tuple[float, str]] | None = None,
+    video_overrides: List[tuple] | None = None,
+    rewind: Dict[str, Any] | None = None,
 ) -> Dict[str, Path]:
     """Render one clip and its poster frame. Returns {'file':..., 'thumb':...}.
 
     `segments` (absolute source seconds, in play order) is a stitched clip:
-    parts from anywhere in the video, jumps in time marked with `labels`."""
+    parts from anywhere in the video, jumps in time marked with `labels`.
+    `video_overrides` and `rewind` are Smart Stitch's inserts and teaser
+    rewind (see motion.render_clip) — the seamless engine only."""
     edits = merge_edits(edits)
+    extras = bool(video_overrides) or bool(rewind)
     if ENGINE != "classic" and edits.get("engine", "seamless") != "classic":
         try:
             return _seamless(
@@ -233,12 +238,19 @@ def render_clip(
                 edits=edits, has_audio=has_audio, layout=resolve_layout(edits, plan), plan=plan,
                 source_size=source_size or tuple(media.probe(Path(source))[k] for k in ("width", "height")),
                 keep=keep, segments=segments, labels=labels,
+                **({"video_overrides": video_overrides, "rewind": rewind} if extras else {}),
             )
         except Exception:
             # Never lose a clip to the new renderer: log it and cut it the old way.
             traceback.print_exc()
+            if extras:
+                # The old way can't draw inserts or a rewind: say so, and let
+                # the caller make the plain cut instead of a wrong one.
+                raise
             if resolve_layout(edits, plan) == "stack":      # the old renderer has no stacked split
                 edits = {**edits, "layout": "blur"}
+    elif extras:
+        raise RuntimeError("A teaser or an insert needs the seamless renderer (CLIPAGENT_ENGINE is classic)")
     if segments:
         # The old renderer reads one stretch of the source, so it can only
         # make a stitched clip whose parts run forwards.
