@@ -1,13 +1,16 @@
 """Make a test "talking head" video: a drawn person who moves, gestures and talks.
 
 usage: python tools/make_test_footage.py SECONDS out.mp4 [--warm|--cold] [--portrait] [--seed N]
+       [--screen A-B[,C-D]]
 
 Nothing is downloaded: the picture is drawn here with OpenCV (a face the
 YuNet face finder recognises, a body, hands that gesture, a room behind), the
 "voice" is a buzzy tone that comes and goes in sentence-length bursts, and a
 small clock in the corner shows the source time of every frame. --warm and
 --cold give the whole picture a camera colour cast, so colour matching between
-two videos can be checked.
+two videos can be checked. --screen A-B shows a "screen share" instead of the
+person from A to B seconds — a trading chart with candles, grid lines, prices
+and a big P&L number — for Smart Stitch's proof shots.
 """
 import sys as _sys
 for _stream in (_sys.stdout, _sys.stderr):  # Windows: print safely even when output goes to a file
@@ -48,12 +51,49 @@ def person(img, cx, cy, r, mouth_open, lean, hand_up):
     cv2.circle(img, (hx, hy), int(r * 0.3), (140, 170, 215), -1)
 
 
+def chart(W, H, t, seed=3):
+    """A trading-platform screen share: dark panel, grid, candles, price axis, P&L."""
+    rng = np.random.default_rng(seed)
+    img = np.full((H, W, 3), (28, 24, 20), np.uint8)
+    left, right, top, bottom = int(W * 0.05), int(W * 0.86), int(H * 0.16), int(H * 0.88)
+    for k in range(11):
+        y = top + (bottom - top) * k // 10
+        cv2.line(img, (left, y), (right, y), (60, 56, 50), 1)
+        cv2.putText(img, f"{4520 + 10 * (10 - k)}.00", (right + 12, y + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                    (200, 200, 200), 2)
+    for k in range(17):
+        x = left + (right - left) * k // 16
+        cv2.line(img, (x, top), (x, bottom), (60, 56, 50), 1)
+    price = (top + bottom) / 2
+    n = 60
+    for k in range(n):
+        o = price
+        price = min(bottom - 20, max(top + 20, price + rng.normal(0, 14) - 3))
+        c = price
+        x = left + 10 + (right - left - 20) * k // n
+        hi, lo = min(o, c) - abs(rng.normal(0, 10)), max(o, c) + abs(rng.normal(0, 10))
+        col = (80, 200, 60) if c < o else (60, 60, 220)
+        cv2.line(img, (x + 5, int(hi)), (x + 5, int(lo)), col, 2)
+        cv2.rectangle(img, (x, int(min(o, c))), (x + 10, int(max(o, c)) + 2), col, -1)
+    cv2.rectangle(img, (0, 0), (W, int(H * 0.11)), (44, 40, 36), -1)
+    for k, name in enumerate(["ES1!", "1m", "Indicators", "Alerts", "Replay", "Trade"]):
+        cv2.putText(img, name, (30 + k * 170, int(H * 0.07)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (220, 220, 220), 2)
+    cv2.putText(img, "P&L  +$50,000", (int(W * 0.30), int(H * 0.30)), cv2.FONT_HERSHEY_DUPLEX, 2.6,
+                (90, 230, 90), 6)
+    return img
+
+
 def main():
     seconds = float(sys.argv[1])
     out = sys.argv[2]
     tint = "warm" if "--warm" in sys.argv else ("cold" if "--cold" in sys.argv else "")
     portrait = "--portrait" in sys.argv
     seed = int(sys.argv[sys.argv.index("--seed") + 1]) if "--seed" in sys.argv else 1
+    screens = []
+    if "--screen" in sys.argv:
+        for span in sys.argv[sys.argv.index("--screen") + 1].split(","):
+            a, b = span.split("-")
+            screens.append((float(a), float(b)))
     rng = np.random.default_rng(seed)
     W, H = (1080, 1920) if portrait else (1920, 1080)
     fps = 30
@@ -79,8 +119,17 @@ def main():
     enc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     r = int(H * 0.11) if not portrait else int(W * 0.17)
     cast = {"warm": (0.78, 0.95, 1.22, 0), "cold": (1.22, 1.0, 0.8, 0)}.get(tint)
+    shared = None
     for i in range(n):
         t = i / fps
+        if any(a <= t < b for a, b in screens):
+            if shared is None:
+                shared = chart(W, H, 0.0)
+            img = shared.copy()
+            cv2.putText(img, f"{t:6.2f}", (int(W * 0.06), H - 40), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 0), 9)
+            cv2.putText(img, f"{t:6.2f}", (int(W * 0.06), H - 40), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (255, 255, 255), 5)
+            enc.stdin.write(img.tobytes())
+            continue
         img = room.copy()
         talking = 0.3 < t % 2.5 < 2.1
         mouth = (0.5 + 0.5 * math.sin(t * 2 * math.pi * 6)) if talking else 0.0

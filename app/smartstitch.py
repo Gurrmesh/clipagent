@@ -608,8 +608,9 @@ TRIGGER = re.compile(
     r"my (?:balance|profit|payout|results?))\b", re.I)
 MONEY = re.compile(r"(\$\s?\d[\d,.]*\s?(?:k|m|grand|thousand|million)?|\b\d[\d,.]*\s?(?:k|grand|thousand|million|"
                    r"percent|%)(?![a-z]))", re.I)
-SCREEN_EDGES = 0.06           # share of edge pixels: a screen full of text, candles and grid lines
-SCAN_W = 320
+SCREEN_EDGES = 0.012          # share of edge pixels at 640 px: text, candles, panels (a face on camera is ~0.007)
+FACECAM_MAX = 0.08            # a face narrower than this share of the frame can be a facecam on a screen share
+SCAN_W = 640
 
 PROOF_TOOL = {
     "name": "pick_proof",
@@ -734,7 +735,10 @@ def _scan(source: Path, info: Dict[str, Any], keyframes: bool) -> List[Dict[str,
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             edges = float(cv2.Canny(gray, 60, 150).mean()) / 255.0
             faces = det.detect(img, gray) if det.kind != "none" else []
-            feats.append((edges, any(f[2] >= 0.12 for f in faces)))
+            # A face on camera: not a screen share — unless it's only a small
+            # facecam over a busy screen.
+            big = bool(faces) and (any(f[2] >= FACECAM_MAX for f in faces) or edges < 2 * SCREEN_EDGES)
+            feats.append((edges, big))
     finally:
         proc.stdout.close()
         proc.wait()
