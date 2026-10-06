@@ -171,7 +171,10 @@ def _group(cands: List[Dict[str, float]]) -> List[List[Dict[str, float]]]:
                 continue
             if hm / max(1.0, min(a["h"], b["h"])) > 1.6:
                 continue
-            if abs(a["y1"] - b["y1"]) > 0.22 * hm and abs(a["y0"] - b["y0"]) > 0.22 * hm:
+            # same baseline, same top, or (mixed case: "hy", "g9") mostly side by side
+            overlap = min(a["y1"], b["y1"]) - max(a["y0"], b["y0"])
+            if (abs(a["y1"] - b["y1"]) > 0.22 * hm and abs(a["y0"] - b["y0"]) > 0.22 * hm
+                    and overlap < 0.7 * min(a["h"], b["h"])):
                 continue
             if abs(a["grey"] - b["grey"]) > 45:
                 continue

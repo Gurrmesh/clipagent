@@ -225,10 +225,12 @@ for bg, text, font, cap, x, y, style in positives:
     if bg is room:
         img = person(img)
     true = burn(img, text, font, cap, x, y, style)
-    got = found_whole(textdetect.detect(jpeg(img)), true)
+    boxes = textdetect.detect(jpeg(img))
+    got = found_whole(boxes, true)
     hit += got
     if not got:
-        print(f"   missed: “{text}” ({font}, {cap:.1%} letters, {style}, on {bg.__name__})")
+        print(f"   missed: “{text}” ({font}, {cap:.1%} letters, {style}, on {bg.__name__}): true "
+              f"{[round(v, 3) for v in true]}, found {[[round(v, 3) for v in b[:4]] for b in boxes]}")
 expect(hit == len(positives), f"big titles found whole: {hit} of {len(positives)} (Anton and Poppins, busy backgrounds)")
 negatives = {"two faces": lambda: person(person(room())), "striped shirt": lambda: person(room(), "v"),
              "diagonal stripes": lambda: person(room(), "d"), "bookshelf": books,
