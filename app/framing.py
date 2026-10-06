@@ -133,6 +133,8 @@ def sample_faces(source: Path, start: float, end: float, count: int = SAMPLE_COU
             if not ok or frame is None:
                 continue
             for (x, y, w, h) in detect(frame):
+                # plain floats: YuNet hands back float32, which the stored plan's JSON can't hold
+                x, y, w, h = float(x), float(y), float(w), float(h)
                 if w / width < FACECAM_MIN_FACE:
                     continue
                 faces.append(Face(t=t, x=x / width, y=y / height,

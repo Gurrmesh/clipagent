@@ -1434,7 +1434,7 @@ def _sample_faces(frames: List[Tuple[float, np.ndarray]]) -> List[framing.Face]:
         h, w = fr.shape[:2]
         for (x, y, fw, fh) in detect(fr):
             if fw / w >= framing.FACECAM_MIN_FACE:
-                out.append(framing.Face(t=t, x=x / w, y=y / h, w=fw / w, h=fh / h))
+                out.append(framing.Face(t=t, x=float(x) / w, y=float(y) / h, w=float(fw) / w, h=float(fh) / h))
     return out
 
 
@@ -1867,4 +1867,5 @@ def render_clip(
         result["camera"] = cam
         result["timeline"] = tl
         result["analysis"] = an
+        result["base"] = base
     return result
