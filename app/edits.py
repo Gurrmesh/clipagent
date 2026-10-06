@@ -546,6 +546,19 @@ def read_pick(reply: Dict[str, Any], sources: List[Dict[str, Any]], style: str,
             "notes": notes}
 
 
+def given_pick(plan: Dict[str, Any], sources: List[Dict[str, Any]], style: str) -> Dict[str, Any]:
+    """Moments chosen elsewhere (Creator Scan's `given_moments`, each naming its source job): no Claude
+    pick, but the same checks Claude's picks get — real times, no repeats, words really said, one drop."""
+    index_of = {x["id"]: i + 1 for i, x in enumerate(sources)}
+    moments = [{**{k: v for k, v in toolio.as_dict(m).items() if k != "source"},
+                "video": index_of.get(toolio.as_dict(m).get("source"), 0)} for m in plan.get("given_moments") or []]
+    post = plan.get("post") or {}
+    picked = read_pick({"moments": moments, "hook": plan.get("hook") or "", "title": plan.get("title") or "",
+                        "caption": post.get("caption") or "", "hashtags": post.get("hashtags") or []}, sources, style)
+    picked["notes"] = list(plan.get("given_notes") or []) + picked["notes"]
+    return picked
+
+
 def snap_moments(moments: List[Dict[str, Any]], style: str,
                  words_by_source: Dict[str, List[Dict[str, Any]]]) -> None:
     """Voice edits play whole sentences: put each moment's edges on sentence edges."""
@@ -1334,8 +1347,11 @@ def plan_edit(eid: str, repick: bool) -> Dict[str, Any]:
     sound = store.get_sound(s.get("sound") or "") if s.get("sound") else None
     if repick or not plan.get("moments"):
         _stage(eid, "Picking the moments", 8)
-        picked = pick_moments(sources, s["style"], s.get("theme", ""), s["length"],
-                              campaign.picker_guidance(rules) if rules else "", plan.get("candidates"), sound)
+        if plan.get("given_moments"):                 # chosen in Creator Scan: no Claude pick, same checks
+            picked = given_pick(plan, sources, s["style"])
+        else:
+            picked = pick_moments(sources, s["style"], s.get("theme", ""), s["length"],
+                                  campaign.picker_guidance(rules) if rules else "", plan.get("candidates"), sound)
         snap_moments(picked["moments"], s["style"], words)
         plan.update({"moments": picked["moments"], "title": picked["title"], "hook": picked["hook"],
                      "pick_notes": picked["notes"], "post": _post(rules, picked["caption"], picked["hashtags"])})
