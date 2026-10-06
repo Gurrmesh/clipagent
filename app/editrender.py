@@ -48,6 +48,10 @@ FLASH_ALPHA, FLASH_K = 0.85, 14.0
 GLITCH_SECONDS = 0.12
 DIP_SECONDS = 0.15
 VIGNETTE = {"aura": "PI/3.6", "motivation": "PI/3.8"}  # stronger dark corners for these; else PI/4.6
+# Film grain: new on every frame, on the brightness only. Colour speckle costs the most
+# bits, turns to smudges first under the bitrate ceiling (motion.VIDEO_CAP), and isn't
+# how film grain looks — it even put colour dots into the black-and-white Motivation look.
+GRAIN = "noise=c0s=7:c0f=t"
 
 # grade: per-channel curves (lift, gamma, gain, as 0..1) for B, G, R + contrast + saturation
 GRADES: Dict[str, Dict[str, Any]] = {
@@ -823,7 +827,7 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
         if fx.get("vignette"):
             vf.append(f"vignette=angle={VIGNETTE.get(style, 'PI/4.6')}")
         if fx.get("grain"):
-            vf.append("noise=alls=7:allf=t")
+            vf.append(GRAIN)
         if fx.get("letterbox"):
             vf.append(f"drawbox=x=0:y=0:w=iw:h={BAR_H}:color=black:t=fill,"
                       f"drawbox=x=0:y=ih-{BAR_H}:w=iw:h={BAR_H}:color=black:t=fill")
@@ -837,7 +841,7 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
                "-i", str(mix), "-filter_complex",
                f"[0:v]{','.join(vf)}[v];[1:a]anull[a]",
                "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
-               "-pix_fmt", "yuv420p", "-r", str(FPS), "-g", str(2 * FPS), "-c:a", "aac", "-b:a", "192k",
+               *motion.VIDEO_CAP, "-pix_fmt", "yuv420p", "-r", str(FPS), "-g", str(2 * FPS), "-c:a", "aac", "-b:a", "192k",
                "-ar", "48000", "-t", f"{N / FPS:.4f}", "-movflags", "+faststart", str(tmp_out)]
         enc_log = tempfile.TemporaryFile()
         enc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=enc_log)
