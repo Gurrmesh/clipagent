@@ -69,9 +69,12 @@ def is_laughter(words: Sequence[Dict[str, Any]]) -> bool:
 # --- rule 4: quotes are verified ---------------------------------------------------------
 
 def _ratio(a: Sequence[str], b: Sequence[str]) -> float:
+    """Words in common over the longer of the two: a changed word always
+    counts against the match, whichever side it is on."""
     if not a or not b:
         return 0.0
-    return SequenceMatcher(None, list(a), list(b), autojunk=False).ratio()
+    m = sum(block.size for block in SequenceMatcher(None, list(a), list(b), autojunk=False).get_matching_blocks())
+    return m / max(len(a), len(b))
 
 
 def _edge_match(q: List[str], ext: List[str], lo: int, hi: int, at_start: bool) -> float:
@@ -220,7 +223,7 @@ def anchor_after(quote: str, words: Sequence[Dict[str, Any]], near: float,
     q = norm_tokens(quote)
     if not q:
         return None
-    ws = _sorted(words, near - window, near + 2.0, pad=0)
+    ws = _sorted(words, near - window, near + 4.0, pad=0)
     if not ws:
         return None
     toks: List[Tuple[str, int]] = [(t, i) for i, w in enumerate(ws) for t in norm_tokens(w["w"])]
@@ -243,12 +246,20 @@ def anchor_after(quote: str, words: Sequence[Dict[str, Any]], near: float,
 
 # --- rule 2: reactions follow what they react to ------------------------------------------
 
-def check_reaction_order(reaction_start: float, reacts_to_end: float,
-                         max_gap: float = 20.0) -> Tuple[bool, str]:
+def check_reaction_order(reaction_start: float, reacts_to_end: float, max_gap: float = 20.0,
+                         words: Optional[Sequence[Dict[str, Any]]] = None,
+                         max_between: int = 6) -> Tuple[bool, str]:
+    """A reaction comes after the line it reacts to, soon after it, and with
+    little else said in between (or it may be reacting to that instead)."""
     if reaction_start < reacts_to_end - 0.25:
         return False, "it happens before the line it's meant to react to"
     if reaction_start - reacts_to_end > max_gap:
         return False, f"it happens {reaction_start - reacts_to_end:.0f}s after the line — too late to be a reaction to it"
+    if words is not None:
+        between = [w for w in words if reacts_to_end + 0.05 <= float(w["start"]) < reaction_start - 0.05]
+        if len(between) > max_between:
+            return False, (f"{len(between)} more words are said before it — too late to be a reaction to that "
+                           "line, it may be reacting to something else")
     return True, ""
 
 

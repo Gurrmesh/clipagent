@@ -54,6 +54,7 @@ from app import (compliance, doctor, highlights, instruct, judge, motion, pipeli
                  stitchrules, store, structure)
 from app.config import RENDER_H, RENDER_W  # noqa: E402
 
+store.init()
 FAILS = []
 DATA = Path(os.environ["DATA_DIR"])
 LOOK = DATA / "frames_to_look_at"
@@ -187,12 +188,15 @@ late = {"id": "p3", "kind": "proof", "at": 124.5, "start": 320.0, "end": 322.0, 
 base = {"teaser": {}, "teaser_on": False, "inserts_on": True}
 plain = smartstitch.plan_render(PAYOFF, {**base, "inserts": [], "teaser_on": True, "teaser": t}, WORDS, SETTINGS,
                                 Fraction(30), None)
-plan = smartstitch.plan_render(PAYOFF, {**base, "inserts": [proof, early, late], "teaser_on": True, "teaser": t},
-                               WORDS, SETTINGS, Fraction(30), None)
+withproof = smartstitch.plan_render(PAYOFF, {**base, "inserts": [proof], "teaser_on": True, "teaser": t},
+                                    WORDS, SETTINGS, Fraction(30), None)
+expect(withproof["words"] == plain["words"] and withproof["segments"] == plain["segments"]
+       and withproof["labels"] == plain["labels"],
+       "a video-only insert leaves the sound's timeline, the captions and labels exactly as they were")
+rw_end = 0.0                                  # no teaser below: the hook is the clip's own first 1.5 s
+plan = smartstitch.plan_render(PAYOFF, {**base, "inserts": [proof, early, late]}, WORDS, SETTINGS, Fraction(30), None)
 ins = plan["receipt"]["inserts"]
 expect(len(plan["overrides"]) == 1 and ins[0]["id"] == "p1", "only the proof shot that fits is placed")
-expect(plan["words"] == plain["words"] and plan["segments"] == plain["segments"],
-       "a video-only insert leaves the sound's timeline and the captions exactly as they were")
 o_s, o_e, src, fit = plan["overrides"][0]
 at_out = next(w["start"] for w in plan["words"] if w["w"] == "Look" and w["start"] > rw_end)
 expect(abs(o_s - (at_out - 0.12)) < 0.05 and fit and src == 300.0,
@@ -230,7 +234,7 @@ expect(laugh is not None and laugh["audio"] == "own" and abs(laugh["at"] - 125.0
 wrong, why = smartstitch.check_insert({"kind": "reaction", "at": 105.0, "reacts_to": "Everyone told me it was a stupid idea.",
                                        "start": 125.9, "end": 126.9, "quote": "Haha", "sound": "laugh", "why": "x"},
                                       [{"start": 99.9, "end": 125.5, "role": "payoff"}], WORDS, 600, 4)
-expect(wrong is None and "too late" in why, f"a laugh put after a line it didn't react to is refused ({why})")
+expect(wrong is None and "something else" in why, f"a laugh put after a line it didn't react to is refused ({why})")
 two_part = [{"start": 99.9, "end": 118.9, "role": "setup", "label": ""}, {"start": 129.9, "end": 135.0, "role": "payoff", "label": ""}]
 plan = smartstitch.plan_render(two_part, {**base, "inserts": [cb]}, WORDS, SETTINGS, Fraction(30), None)
 roles = [(p["role"], p["start"]) for p in plan["receipt"]["parts"]]
@@ -268,25 +272,26 @@ blk = CALLS[-1]["messages"][0]["content"]
 expect("flash-forward" in blk and "Part 2" in blk, "the judge is told what the teaser is")
 
 print("\n== funny moments: stitched only with a setup or callback")
-funny = {"start": 118.0, "end": 127.0, "hook": "h", "type": "funny"}
-funny["variants"] = {"continuous": structure._as_variant(119.1, 127.0, "h"), "stitched": None}
-item = {"continuous": {"start": 119.1, "end": 127.0, "hook": "h"},
+funny = {"start": 115.3, "end": 127.0, "hook": "h", "type": "funny"}
+funny["variants"] = {"continuous": structure._as_variant(115.3, 127.0, "h"), "stitched": None}
+item = {"continuous": {"start": 115.3, "end": 127.0, "hook": "h"},
         "stitched": {"parts": [{"start": 59.9, "end": 62.9, "role": "setup", "label": "",
                                 "quote": "I will never sell this account."},
-                               {"start": 119.1, "end": 127.0, "role": "payoff", "label": "",
-                                "quote": "I made fifty grand in one morning. My wife thought I was joking. Haha"}],
+                               {"start": 115.3, "end": 127.0, "role": "payoff", "label": "",
+                                "quote": "Then one day it all came together. I made fifty grand in one morning. "
+                                         "My wife thought I was joking. Haha"}],
                      "hook": "h"}}
 structure._apply(funny, item, WORDS, 600.0, max_len=90)
 expect(funny["variants"]["stitched"] is not None, f"with a setup from earlier: accepted ({funny.get('stitch_problem')})")
-funny2 = {"start": 118.0, "end": 127.0, "hook": "h", "type": "funny",
-          "variants": {"continuous": structure._as_variant(119.1, 127.0, "h"), "stitched": None}}
+funny2 = {"start": 115.3, "end": 127.0, "hook": "h", "type": "funny",
+          "variants": {"continuous": structure._as_variant(115.3, 127.0, "h"), "stitched": None}}
 item2 = json.loads(json.dumps(item))
 item2["stitched"]["parts"][0]["role"] = "premise"
 structure._apply(funny2, item2, WORDS, 600.0, max_len=90)
 expect(funny2["variants"]["stitched"] is None and "setup or callback" in funny2["stitch_problem"],
        f"without one: refused ({funny2.get('stitch_problem')})")
-story_clip = {"start": 118.0, "end": 127.0, "hook": "h", "type": "story",
-              "variants": {"continuous": structure._as_variant(119.1, 127.0, "h"), "stitched": None}}
+story_clip = {"start": 115.3, "end": 127.0, "hook": "h", "type": "story",
+              "variants": {"continuous": structure._as_variant(115.3, 127.0, "h"), "stitched": None}}
 item3 = json.loads(json.dumps(item))
 item3["stitched"]["parts"][0]["quote"] = "I will sell everything tomorrow morning."
 structure._apply(story_clip, item3, WORDS, 600.0, max_len=90)
@@ -380,7 +385,8 @@ right = sum(1 for x, y in zip(want, cc) if x is not None and x == y)
 expect(len(cc) == len(want) and right == len(want) - rw,
        f"teaser frames, then {rw} rewind frames, then the story — every story frame right ({right})")
 back = cc[t_frames:t_frames + rw]
-expect(all(tl.segments[0][0] <= x < tl.segments[0][1] + 40 for x in back) and back[0] > back[-1],
+inside = sum(1 for x in back if tl.segments[0][0] <= x < tl.segments[0][1])     # blended frames can misread
+expect(inside >= 0.75 * len(back) and back[0] > back[-1] and back[0] >= tl.segments[0][1] - 6,
        f"the rewind plays the teaser's frames backwards ({back[0]} → {back[-1]})")
 p = pcm(c["file"])
 r0, r1 = int(after * 48000) + 300, int((after + rw / float(fps)) * 48000) - 300

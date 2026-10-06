@@ -224,7 +224,7 @@ def check_insert(raw: Any, parts: Sequence[Dict[str, Any]], words: Sequence[Dict
             return None, "a callback has to be an earlier line"
         audio, fit = "own", False
     else:
-        ok, why = stitchrules.check_reaction_order(s, anchor)
+        ok, why = stitchrules.check_reaction_order(s, anchor, words=words)
         if not ok:
             return None, why
         laugh = stitchrules.is_laughter([w for w in words if s - 0.05 <= float(w["start"]) < e - 0.05])
