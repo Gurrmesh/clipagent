@@ -154,8 +154,13 @@ eid = r.json()["id"]
 e = wait(eid)
 j = client.get(f"/api/edits/{eid}").json()
 expect(j["status"] == "done" and j["video_url"] and j["thumb_url"], f"made ({j['stage']}, {j.get('error')})")
-expect(j["hook"] == "He made 2 million in seven years" and len(j["moments"]) == 10, "the hook and moments kept")
+expect(j["hook"] == "He made 2 million in seven years" and len(j["moments"]) == edits.count_for("velocity", 10)[1],
+       f"the hook kept, and as many moments as a 10 s edit can use ({len(j['moments'])})")
 expect("his money story" in PROMPTS[-1]["messages"][0]["content"], "the theme reached Claude")
+expect("every moment plays 1.5 to 4 seconds" in PROMPTS[-1]["messages"][0]["content"] and
+       "fill about 10 seconds" in PROMPTS[-1]["messages"][0]["content"], "Claude is told the moment length and the budget")
+expect(all(1.5 - 0.01 <= m["length"] <= 4.0 + 0.01 for m in j["moments"] if not m.get("left_out")),
+       f"each moment is on screen 1.5–4 s ({[m['length'] for m in j['moments']]})")
 expect(client.get(j["video_url"]).status_code == 200 and client.get(j["thumb_url"]).status_code == 200,
        "the video and its poster are served")
 expect(client.get(j["moments"][0]["thumb"]).status_code == 200, "each moment has a picture")
@@ -231,7 +236,7 @@ expect(not r.json()["reply"]["changed"] and r.json()["reply"]["question"], "a qu
 ANSWERS["change_edit"] = {"understood": "New hook.", "hook": "He made 40 million in a week"}
 r = client.post(f"/api/edits/{eid}/ask", json={"text": "change the hook"})
 expect(r.json()["reply"]["cant"] and not r.json()["reply"]["changed"], "a hook with a made-up number is refused")
-target = next(m["id"] for m in j5["moments"] if m["start"] == 22.0)
+target = next(m["id"] for m in j5["moments"] if abs(m["start"] - 22.0) < 0.5)
 ANSWERS["change_edit"] = {"understood": "The 2 million line goes on the drop.",
                           "moments": [{"id": m["id"], "drop": m["id"] == target} for m in j5["moments"]]}
 client.post(f"/api/edits/{eid}/ask", json={"text": "put the 2 million line on the drop"})
@@ -252,6 +257,122 @@ expect(len(ids) == 1 and v and v["status"] == "done" and v["settings"]["sound"] 
        "a version cut to the other song")
 expect(len(PROMPTS) == calls and "·" in v["title"], "same moments, no new Claude call, named after the song")
 
+# --- moment lengths: a Funny edit from long moments, then typed and by-hand size changes ------------
+print("== a Funny edit from long moments")
+LINES = {k: 2.0 + k * 4.0 for k in range(14)}                  # "this is line number k of the talk", 2.8 s each
+
+
+def word_cut(t):
+    """True when second t falls inside a spoken word."""
+    return any(w["start"] + 0.03 < t < w["end"] - 0.03 for w in words)
+
+
+ANSWERS["pick_moments"] = {
+    "title": "Funniest bits", "hook": "He made 2 million in seven years", "caption": "Ha.", "hashtags": ["funny"],
+    "moments": [{"video": 1, "start": 2.0, "end": 13.0, "hit": 7.0, "text": "bro", "drop": False},
+                {"video": 1, "start": 13.5, "end": 26.0, "hit": 23.0, "text": "the 2 million", "drop": True},
+                {"video": 1, "start": 26.0, "end": 38.0, "hit": 31.0, "text": "", "drop": False},
+                {"video": 1, "start": 38.0, "end": 48.0, "hit": 43.0, "text": "", "drop": False},
+                {"video": 1, "start": 48.0, "end": 58.0, "hit": 52.0, "text": "", "drop": False}]}
+r = client.post("/api/edits", json={"style": "funny", "sources": [job_id], "sound": "", "length": 20})
+fid = r.json()["id"]
+wait(fid)
+fj = client.get(f"/api/edits/{fid}").json()
+fm = [m for m in fj["moments"] if not m.get("left_out")]
+expect(fj["status"] == "done" and all(3.0 - 0.06 <= m["end"] - m["start"] <= 8.0 + 0.06 for m in fm),
+       f"10–12.5 s picks cut to Funny's 3–8 s ({[round(m['end'] - m['start'], 1) for m in fm]})")
+expect(abs(fj["length"] - 20) <= 3.0, f"the edit is {fj['length']:.1f} s for 20 s asked")
+expect(not any(word_cut(m["start"]) or word_cut(m["end"]) for m in fm), "every cut between words")
+expect(any("down to the punchline" in n for n in fj["notes"]), "it says the long moments were cut down")
+expect("every moment plays 3 to 8 seconds" in PROMPTS[-1]["messages"][0]["content"], "Claude was told 3–8 s")
+
+print("== typed size changes")
+before = {m["id"]: m for m in fj["moments"]}
+second = fj["moments"][1]["id"]
+ANSWERS["change_edit"] = {"understood": "The second moment gets shorter.", "resize": [{"id": second, "size": "shorter"}]}
+r = client.post(f"/api/edits/{fid}/ask", json={"text": "make the second moment shorter"})
+rep = r.json()["reply"]
+wait(fid)
+fj2 = client.get(f"/api/edits/{fid}").json()
+m2 = next(m for m in fj2["moments"] if m["id"] == second)
+old = before[second]
+expect(rep["changed"] and m2["end"] - m2["start"] < old["end"] - old["start"] - 0.5 and m2.get("manual"),
+       f"“make the second moment shorter”: {old['end'] - old['start']:.1f} → {m2['end'] - m2['start']:.1f} s")
+expect(not word_cut(m2["start"]) and not word_cut(m2["end"]) and m2["start"] <= m2["hit"] <= m2["end"],
+       "…cut between words, the punchline kept")
+expect(abs(fj2["length"] - 20) <= 3.0, f"…and the edit still {fj2['length']:.1f} s")
+expect("Claude" not in " ".join(rep.get("done") or []) and rep.get("done"), f"it says what it did: {rep.get('done')}")
+prompt = PROMPTS[-1]["messages"][0]["content"]
+expect("1. m1" in prompt and "2. " + second in prompt and "usually plays 3–8 s" in prompt,
+       "Claude sees the moments numbered, with their lengths and the style's usual length")
+
+third = fj2["moments"][2]["id"]
+old3 = next(m for m in fj2["moments"] if m["id"] == third)
+ANSWERS["change_edit"] = {"understood": "Cutting the first 2 seconds of moment 3.",
+                          "resize": [{"id": third, "trim_start": 2}]}
+client.post(f"/api/edits/{fid}/ask", json={"text": "cut the first 2 seconds of moment 3"})
+wait(fid)
+fj3 = client.get(f"/api/edits/{fid}").json()
+m3 = next(m for m in fj3["moments"] if m["id"] == third)
+expect(1.0 <= m3["start"] - old3["start"] <= 3.2 and abs(m3["end"] - old3["end"]) < 0.05 and not word_cut(m3["start"]),
+       f"“cut the first 2 seconds of moment 3”: starts {m3['start'] - old3['start']:.1f} s later, on a word")
+
+first = fj3["moments"][0]
+old1 = first
+k_line = next(k for k, t0 in LINES.items() if t0 >= first["start"] - 0.2)
+ANSWERS["change_edit"] = {"understood": "The first moment ends after that line.",
+                          "resize": [{"id": first["id"], "end_words": f"line number {k_line}"}]}
+client.post(f"/api/edits/{fid}/ask", json={"text": f"end the first moment right after he says 'line number {k_line}'"})
+wait(fid)
+fj4 = client.get(f"/api/edits/{fid}").json()
+m1 = next(m for m in fj4["moments"] if m["id"] == first["id"])
+said_end = LINES[k_line] + 4 * 0.35 + 0.3                       # "…line number k" ends here
+expect(said_end - 0.01 <= m1["end"] <= said_end + 0.25 and not word_cut(m1["end"]),
+       f"“end right after he says 'line number {k_line}'”: ends at {m1['end']:.2f} s (the word ends {said_end:.2f})")
+expect(any("because you asked" in n for n in fj4["notes"]) or 3.0 <= m1["end"] - m1["start"],
+       "a moment cut shorter than Funny's 3 s says it's because you asked")
+
+ANSWERS["change_edit"] = {"understood": "The funny one runs longer.", "resize": [{"id": second, "size": "longer"}]}
+client.post(f"/api/edits/{fid}/ask", json={"text": "let the funny one run longer"})
+wait(fid)
+fj5 = client.get(f"/api/edits/{fid}").json()
+m2b = next(m for m in fj5["moments"] if m["id"] == second)
+m2a = next(m for m in fj4["moments"] if m["id"] == second)
+expect(m2b["end"] - m2b["start"] > m2a["end"] - m2a["start"] + 0.5 and m2b["start"] <= m2a["start"] + 0.01
+       and m2b["end"] >= m2a["end"] - 0.01, f"“let the funny one run longer”: {m2a['end'] - m2a['start']:.1f} → "
+                                            f"{m2b['end'] - m2b['start']:.1f} s, around what it was")
+expect(abs(fj5["length"] - 20) <= 3.0, f"…the edit still {fj5['length']:.1f} s")
+
+r = client.post(f"/api/edits/{fid}/undo")
+ju = r.json()
+mu = next(m for m in ju["moments"] if m["id"] == second)
+expect(r.status_code == 200 and abs((mu["end"] - mu["start"]) - (m2a["end"] - m2a["start"])) < 0.02,
+       "undo puts the moment back as it was")
+
+ANSWERS["change_edit"] = {"understood": "15 seconds it is.", "length": 15}
+client.post(f"/api/edits/{fid}/ask", json={"text": "make the whole thing 15 seconds"})
+wait(fid)
+fj6 = client.get(f"/api/edits/{fid}").json()
+expect(fj6["settings"]["length"] == 15 and abs(fj6["length"] - 15) <= 0.15 * 15 + 0.01,
+       f"“make the whole thing 15 seconds”: {fj6['length']:.1f} s")
+
+ANSWERS["change_edit"] = {"understood": "Ending it there.", "resize": [{"id": second, "end_words": "to the moon"}]}
+r = client.post(f"/api/edits/{fid}/ask", json={"text": "end it when he says to the moon"})
+rep = r.json()["reply"]
+expect(not rep["changed"] and any("Couldn't find" in c for c in rep["cant"]),
+       f"words he never says: nothing changes, and it says so (“{rep['cant'][-1] if rep['cant'] else ''}”)")
+
+print("== by hand: Shorter / Longer")
+cur = client.get(f"/api/edits/{fid}").json()
+one = cur["moments"][0]
+r = client.post(f"/api/edits/{fid}/remake", json={"resize": [{"id": one["id"], "steps": 1}]})
+wait(fid)
+after_ = next(m for m in client.get(f"/api/edits/{fid}").json()["moments"] if m["id"] == one["id"])
+expect(r.status_code == 200 and after_["end"] - after_["start"] > one["end"] - one["start"] + 0.5,
+       f"Longer: {one['end'] - one['start']:.1f} → {after_['end'] - after_['start']:.1f} s")
+r = client.post(f"/api/edits/{fid}/remake", json={"resize": [{"id": one["id"], "trim_start": 99}]})
+expect(r.status_code == 400 and "stays as it was" in r.json()["detail"], f"an impossible trim: “{r.json()['detail']}”")
+
 # --- campaign rules -------------------------------------------------------------------------
 print("== campaign rules")
 strict = store.save_campaign("Strict brand", "source", "brief", {"mode": "source", "name": "Strict brand"})
@@ -261,7 +382,8 @@ expect(r.status_code == 400 and "joining different moments" in r.json()["detail"
        f"a brief that doesn't allow joining moments: “{r.json()['detail'][:80]}…”")
 nomusic = store.save_campaign("TJR — Reach", "source", "brief", {
     "mode": "source", "name": "TJR — Reach", "overrides": {"stitch": "yes"},
-    "caption": {"hashtags": [{"text": "TJR", "verified": True}]}})
+    "caption": {"hashtags": [{"text": "TJR", "verified": True}]},
+    "look_for": ["Big wins explained calmly", "His trading rules"]})
 r = client.post("/api/edits", json={"style": "velocity", "sources": [job_id], "sound": s1["id"],
                                     "campaign_id": nomusic})
 expect(r.status_code == 400 and "doesn't allow added music" in r.json()["detail"],
@@ -274,6 +396,9 @@ ANSWERS["pick_moments"] = {"title": "His lesson", "hook": "Seven years to make i
                                        {"video": 1, "start": 30.0, "end": 32.9, "hit": 31.0, "text": ""}]}
 ce = wait(r.json()["id"])
 cj = client.get(f"/api/edits/{ce['id']}").json()
+pick_prompt = next(p for p in reversed(PROMPTS) if p["tool_choice"]["name"] == "pick_moments")["messages"][0]["content"]
+expect("WHAT THIS CAMPAIGN WANTS TO SEE" in pick_prompt and "- Big wins explained calmly" in pick_prompt
+       and "- His trading rules" in pick_prompt, "the brief's “what to look for” reaches Claude, word for word")
 expect(cj["status"] == "done" and cj["compliance"] and cj["compliance"]["status"] in ("ready", "check"),
        f"a no-music edit for the campaign passes its check ({(cj['compliance'] or {}).get('summary')})")
 expect("#TJR" in cj["post_text"], "the campaign's hashtag is in the caption")

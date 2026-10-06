@@ -2257,7 +2257,7 @@ def _snap_start(src: Dict[str, Any], t: float, voice: bool) -> Optional[float]:
     if not near or k >= len(ws) and t > ws[-1]["end"]:
         return max(t, ws[-1]["end"] + 0.02) if ws else t
     costs = (0.0, 1.2, 4.0) if voice else (0.0, 0.3, 0.6)
-    i = min(near, key=lambda i: costs[src["sq"][i]] + 2.0 * abs(ws[i]["start"] - t))
+    i = min(near, key=lambda i: costs[src["sq"][i]] + 3.0 * abs(ws[i]["start"] - t))   # his amount counts most
     return _start_range(ws, i)[1]
 
 
@@ -2272,7 +2272,7 @@ def _snap_end(src: Dict[str, Any], t: float, voice: bool, src_dur: float) -> flo
     if not near or k < 0:
         return min(t, ws[0]["start"] - 0.02) if ws else t
     costs = (0.0, 1.2, 4.0) if voice else (0.0, 0.3, 0.6)
-    j = min(near, key=lambda j: costs[src["eq"][j]] + 2.0 * abs(ws[j]["end"] - t))
+    j = min(near, key=lambda j: costs[src["eq"][j]] + 3.0 * abs(ws[j]["end"] - t))
     return _end_range(ws, j, src_dur)[0]
 
 
