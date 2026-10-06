@@ -184,14 +184,14 @@ def _ticker() -> None:
             traceback.print_exc()
 
 
-def start() -> None:
+def start(background: bool = True) -> None:
     """At startup: the auto-retry clock, and any links kept from before a restart that can run now."""
     global _ticker_started
     if not _ticker_started:
         _ticker_started = True
         threading.Thread(target=_ticker, name="youtube-pause", daemon=True).start()
     if _next(set()):
-        run_waiting()
+        run_waiting(background)
 
 
 def waiting_ids() -> List[str]:
