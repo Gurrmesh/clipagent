@@ -460,23 +460,189 @@ def block_height(lines: int, size: int) -> float:
     return size * ANTON_CAP * (1 + LEADING * (lines - 1))
 
 
+# --- where the words may go: never over his face -------------------------------------------
+
+# How far libass's ink reaches past the capitals (outline, shadow, a Q's tail, a comma), as
+# fractions of the size, measured: a little above the first line's capitals, more below the last.
+INK_ABOVE, INK_BELOW = 0.05, 0.14
+# Poppins subtitles sit on their anchor (\an2); their ink runs from 0.85 to 0.14 of the size above it.
+SUB_SIZE, SUB_INK_TOP, SUB_INK_BOTTOM = 96, 0.85, 0.14
+SUB_BOTTOM = 1500                                # where a subtitle line sits when the face allows
+TEXT_MIN_SIZE = 64                               # words never shrink below this to get out of the way
+# The head around a face the finder saw, in face heights: hair above, chin and neck below, the
+# sides — with room for him to move, since a moment's face is found on a few stills, not followed.
+HEAD_ABOVE, HEAD_BELOW, HEAD_SIDE = 0.95, 0.75, 0.65
+FACE_ABOVE, FACE_BELOW, FACE_SIDE = 0.30, 0.60, 0.45      # just the eyes, nose and mouth
+FACE_MARGIN = 36                                          # output px kept clear around the head
+
+
+def text_zone(letterbox: bool) -> Tuple[float, float]:
+    """Where words' ink may go, top to bottom: under the apps' top bar (or the cinema bar), above their caption area."""
+    return float((BAR_H + 30) if letterbox else SAFE_TOP + 30), float(OH - SAFE_BOTTOM - 20)
+
+
+def _ink(size: float, pop: float = 1.0) -> Tuple[float, float]:
+    """How far the ink reaches (above, below) a block of Anton capitals. `pop`: how big the words
+    start before settling (\\fscy118 → 1.18); they grow from each line's top, so only downwards."""
+    return INK_ABOVE * size, INK_BELOW * size + (pop - 1.0) * (ANTON_TOP + ANTON_CAP + INK_BELOW) * size
+
+
+def place(want: float, height: float, ink: Tuple[float, float], avoid: List[Tuple[float, float]],
+          lo: float, hi: float) -> Optional[float]:
+    """The top for a block `height` tall (its ink reaching `ink` = (above, below) further) as near
+    `want` as it can be: all of it between lo and hi, none of it over any (top, bottom) band in
+    `avoid`. None when there's no such place."""
+    up, down = ink
+
+    def clear(top: float) -> bool:
+        a, b = top - up, top + height + down
+        return a >= lo - 0.5 and b <= hi + 0.5 and all(b <= t0 or a >= t1 for t0, t1 in avoid)
+
+    tries = [want, min(max(want, lo + up), hi - down - height)]
+    for t0, t1 in avoid:
+        tries += [t0 - down - height, t1 + up]                 # just above the band, just below it
+    good = [t for t in tries if clear(t)]
+    return min(good, key=lambda t: (abs(t - want), t)) if good else None
+
+
+def _box(M: np.ndarray, cx: float, cy: float, fh: float, above: float, below: float, side: float,
+         margin: float) -> Tuple[float, float, float, float]:
+    xs, ys = (cx - side * fh, cx + side * fh), (cy - above * fh, cy + below * fh)
+    pts = np.array([[x, y, 1.0] for x in xs for y in ys]) @ M.T
+    return (float(pts[:, 0].min() - margin), float(pts[:, 1].min() - margin),
+            float(pts[:, 0].max() + margin), float(pts[:, 1].max() + margin))
+
+
+class FaceTrack:
+    """Where the face is on screen in every frame of the edit (output px), worked out the way
+    render() draws it: the moment's crop window, its zoom (push-ins, punches), its shake.
+
+    faces(a, b) → {left, top, right, bottom}: everything the head covers in any frame from a to
+    b seconds, or None when no face was found there. faces(a, b, tight=True): just the eyes to
+    the chin — the last thing words may ever cover."""
+
+    def __init__(self, tl: Dict[str, Any], sources: Dict[str, "Source"], looks: Dict[str, Dict[str, Any]]):
+        segs, style, fx = tl["segments"], tl["style"], tl.get("effects") or {}
+        N = int(round(float(tl["length"]) * FPS))
+        self.head = np.full((N, 4), np.nan)
+        self.core = np.full((N, 4), np.nan)
+        for i, s in enumerate(segs):
+            look = looks.get(s["moment"]) or {}
+            if not look.get("found") or not look.get("face_h"):
+                continue
+            src = sources[s["source"]]
+            # the same window render() reads for this moment
+            win = int(min(src.w, src.h * 9 / 16 * 1.12 + 40))
+            win -= win % 2
+            x0 = int(min(max(0, look["cx"] - win / 2), src.w - win))
+            x0 -= x0 % 2
+            cx, cy, fh = look["cx"] - x0, look["cy"], float(look["face_h"])
+            n0 = int(round(s["at"] * FPS))
+            n1 = N if i == len(segs) - 1 else int(round((s["at"] + s["dur"]) * FPS))
+            for n in range(max(0, n0), min(n1, N)):
+                t = (n - n0) / FPS
+                z = zoom_at(s, t, style, fx)
+                sx, sy, rot = shake_at(s, t, style)
+                if sx or sy:
+                    z *= 1.0 + 2.2 * (abs(sx) + abs(sy)) / OW
+                if s.get("blur_in") and t < 3 / FPS:
+                    z *= 1.045                                   # the zoom blur's widest copy
+                M = affine(win, src.h, cx, cy, z, rot, sx, sy)
+                self.head[n] = _box(M, cx, cy, fh, HEAD_ABOVE, HEAD_BELOW, HEAD_SIDE, FACE_MARGIN)
+                self.core[n] = _box(M, cx, cy, fh, FACE_ABOVE, FACE_BELOW, FACE_SIDE, 12)
+
+    def __call__(self, a: float, b: float, tight: bool = False) -> Optional[Dict[str, float]]:
+        boxes = self.core if tight else self.head
+        part = boxes[max(0, int(math.floor(a * FPS))):max(0, min(len(boxes), int(math.ceil(b * FPS)) + 1))]
+        part = part[~np.isnan(part[:, 0])]
+        if not len(part):
+            return None
+        return {"left": float(part[:, 0].min()), "top": float(part[:, 1].min()),
+                "right": float(part[:, 2].max()), "bottom": float(part[:, 3].max())}
+
+
+def _faces_fn(face: Any) -> Callable[..., Optional[Dict[str, float]]]:
+    """A FaceTrack as it is; one fixed box ({top, bottom}) for every moment; or no face at all."""
+    if callable(face):
+        return face
+    return lambda a, b, tight=False: face or None
+
+
+def fit_clear(text: str, size: int, max_lines: int, min_size: int, want: Callable[[float], float],
+              faces: Callable[..., Optional[Dict[str, float]]], a: float, b: float, lo: float, hi: float,
+              pop: float = 1.0, avoid: Tuple[Tuple[float, float], ...] = (),
+              strict: bool = False) -> Optional[Tuple[List[str], int, float]]:
+    """Wrap uppercase Anton words and find their place for the time they're up (a..b s): as near
+    `want(block height)` as they can be, never over his head, smaller when the head leaves too little
+    room. When even small words can't clear the whole head they keep off his eyes and mouth; failing
+    that (a face filling the screen) they go to the end of the screen furthest from his mouth.
+    Returns (lines, size, top of the capitals). strict: only a place clear of his whole head at a
+    comfortable size will do — None otherwise."""
+    comfy = max(TEXT_MIN_SIZE, int(min_size * 0.75))
+    tiers = ((False, comfy),) if strict else \
+        ((False, comfy), (True, comfy), (False, TEXT_MIN_SIZE), (True, TEXT_MIN_SIZE))
+    for tight, floor in tiers:
+        box = faces(a, b, tight=tight)
+        if tight and box is None:
+            continue                                         # no face: the tier before tried exactly this
+        bands = list(avoid) + ([(box["top"], box["bottom"])] if box else [])
+        s = size
+        while True:
+            lines = wrap(text, max(6, int(TEXT_W / (ANTON_W * s))))
+            if len(lines) <= max_lines or s <= min(min_size, floor):
+                h = block_height(len(lines), s)
+                top = place(want(h), h, _ink(s, pop), bands, lo, hi)
+                if top is not None:
+                    return lines, s, top
+            if s <= floor:
+                break
+            s = max(floor, int(s * 0.9))
+    if strict:
+        return None
+    s = TEXT_MIN_SIZE
+    lines = wrap(text, max(6, int(TEXT_W / (ANTON_W * s))))
+    h = block_height(len(lines), s)
+    up, down = _ink(s, pop)
+    core = faces(a, b, tight=True) or {"top": 0.0, "bottom": 0.0}
+    mouth = core["top"] + 0.8 * (core["bottom"] - core["top"])
+    top = lo + up if mouth > (lo + hi) / 2 else hi - down - h
+    return lines, s, top
+
+
+def sub_spot(faces: Callable[..., Optional[Dict[str, float]]], a: float, b: float, lo: float, hi: float,
+             avoid: Tuple[Tuple[float, float], ...] = ()) -> Tuple[float, int]:
+    """Where a subtitle line sits (its bottom anchor, \\an2) and its size: low on the screen as usual
+    unless his face is there, then just above or below his head — smaller if it must, off his eyes
+    and mouth at the very least, at the end of the screen furthest from his mouth if nothing else fits."""
+    for tight in (False, True):
+        box = faces(a, b, tight=tight)
+        if tight and box is None:
+            break
+        bands = list(avoid) + ([(box["top"], box["bottom"])] if box else [])
+        for fs in (SUB_SIZE, 84, 72):
+            h = (SUB_INK_TOP - SUB_INK_BOTTOM) * fs
+            top = place(SUB_BOTTOM - SUB_INK_TOP * fs, h, (3.0, 4.0), bands, lo, hi)
+            if top is not None:
+                return top + SUB_INK_TOP * fs, fs
+    core = faces(a, b, tight=True) or {"top": 0.0, "bottom": 0.0}
+    mouth = core["top"] + 0.8 * (core["bottom"] - core["top"])
+    return (lo + 3 + SUB_INK_TOP * 72 if mouth > (lo + hi) / 2 else hi - 4 + SUB_INK_BOTTOM * 72), 72
+
+
 def hook_top(lines: int, size: int, face: Optional[Dict[str, float]], letterbox: bool) -> int:
     """Where the hook's capitals start: in the top third, never over the face —
     under the chin when there's no room above the head."""
     h = block_height(lines, size)
-    top_min = (BAR_H + 40) if letterbox else SAFE_TOP + 40
-    top = 400.0
-    if face:
-        if top + h > face["top"] - 30:
-            top = face["top"] - 30 - h
-        if top < top_min:                                       # no room above the head
-            top = min(face["bottom"] + 50, OH - SAFE_BOTTOM - 120 - h)
-    return int(max(top_min, top))
+    lo, hi = text_zone(letterbox)
+    ink = _ink(size, 1.18)
+    top = place(400.0, h, ink, [(face["top"], face["bottom"])] if face else [], lo, hi)
+    return int(round(top if top is not None else max(400.0, lo + ink[0])))
 
 
-def build_ass(tl: Dict[str, Any], out: Path, face: Optional[Dict[str, float]] = None) -> bool:
-    """All the words of an edit. Returns False when there are none. `face`
-    (output px: top, bottom) is where the first shot's face is."""
+def build_ass(tl: Dict[str, Any], out: Path, face: Any = None) -> bool:
+    """All the words of an edit. Returns False when there are none. `face` is where his face is
+    on screen: a FaceTrack (every moment, frame by frame), one fixed box (output px: top,
+    bottom) for the whole edit, or None. No words ever go over it."""
     L = tl["length"]
     loop = tl.get("loop") or 0.0
     stop = L - loop - 0.03 if loop else L
@@ -499,6 +665,8 @@ def build_ass(tl: Dict[str, Any], out: Path, face: Optional[Dict[str, float]] = 
         "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
     events: List[str] = []
+    faces = _faces_fn(face)
+    lo, hi = text_zone(letterbox)
 
     def add(a: float, b: float, style: str, text: str, layer: int = 0) -> None:
         b = min(b, stop)
@@ -513,15 +681,35 @@ def build_ass(tl: Dict[str, Any], out: Path, face: Optional[Dict[str, float]] = 
             y = top + i * pitch - ANTON_TOP * size
             add(a, b, style, f"{{\\an8\\pos({TEXT_CX},{y:.0f})\\fs{size}{tags}}}{line}", layer)
 
+    def shots(a: float, b: float) -> List[Tuple[float, float]]:
+        """a..b cut where the picture moves to another moment (a short leftover joins its neighbour)."""
+        pts = [a] + [s["at"] for k, s in enumerate(segs)
+                     if k and s["moment"] != segs[k - 1]["moment"] and a + 0.3 < s["at"] < b - 0.3] + [b]
+        return list(zip(pts, pts[1:]))
+
     hook = tl.get("hook") or {}
     hook_end = 0.0
     top_text = None                                          # where top captions go (the hook's place)
+    hook_bands: List[Tuple[float, float, Tuple[float, float]]] = []
     if hook.get("text"):
-        lines, size = fit(_clean(hook["text"]).upper(), 140, 3, 92)
-        top_text = hook_top(len(lines), size, face, letterbox)
         hook_end = hook["end"]
-        stack(0.0, hook_end, "Hook", [_colour_words(l, "", YELLOW) for l in lines], size, top_text,
-              "\\fad(0,160)\\fscx118\\fscy118\\t(0,110,\\fscx100\\fscy100)", 2)
+        text = _clean(hook["text"]).upper()
+        # one place for the whole hook when one clears his head; else a place per shot (it moves on the cut)
+        whole = fit_clear(text, 140, 3, 92, lambda h: 400.0, faces, 0.0, hook_end, lo, hi, pop=1.18, strict=True)
+        pieces = [(0.0, hook_end)] if whole else shots(0.0, hook_end)
+        spots = [whole] if whole else [fit_clear(text, 140, 3, 92, lambda h: 400.0, faces, a, b, lo, hi, pop=1.18)
+                                       for a, b in pieces]
+        if len(spots) > 1:                                   # the same size in every shot
+            size = min(sp[1] for sp in spots)
+            spots = [fit_clear(text, size, 3, min(92, size), lambda h: 400.0, faces, a, b, lo, hi, pop=1.18)
+                     for a, b in pieces]
+        for k, ((a, b), (lines, size, top)) in enumerate(zip(pieces, spots)):
+            up, down = _ink(size, 1.18)
+            hook_bands.append((a, b, (top - up, top + block_height(len(lines), size) + down)))
+            tags = ("\\fscx118\\fscy118\\t(0,110,\\fscx100\\fscy100)" if k == 0 else "") + \
+                ("\\fad(0,160)" if k == len(pieces) - 1 else "")
+            stack(a, b, "Hook", [_colour_words(l, "", YELLOW) for l in lines], size, top, tags, 2)
+            top_text = top
 
     def run_end(i: int) -> float:
         j = i + 1
@@ -538,12 +726,13 @@ def build_ass(tl: Dict[str, Any], out: Path, face: Optional[Dict[str, float]] = 
             if b - a < 0.6:
                 continue
             if mode == "punch":
-                lines, size = fit(_clean(s["text"]).upper(), 236, 2, 150)
+                lines, size, top = fit_clear(_clean(s["text"]).upper(), 236, 2, 150, lambda h: OH * 0.62 - h / 2,
+                                             faces, a, b, lo, hi, pop=1.12)
                 tags, colour, style = "\\fscx112\\fscy112\\t(0,90,\\fscx100\\fscy100)", YELLOW, "Punch"
             else:
-                lines, size = fit(_clean(s["text"]).upper(), 168, 3, 110)
+                lines, size, top = fit_clear(_clean(s["text"]).upper(), 168, 3, 110, lambda h: OH * 0.62 - h / 2,
+                                             faces, a, b, lo, hi)
                 tags, colour, style = "\\fad(140,140)", GOLD, "Quote"
-            top = OH * 0.62 - block_height(len(lines), size) / 2
             stack(a, b, style, [_colour_words(l, s.get("key", ""), colour) for l in lines], size, top, tags)
     elif mode == "subtitle":
         for s in segs:
@@ -559,8 +748,11 @@ def build_ass(tl: Dict[str, Any], out: Path, face: Optional[Dict[str, float]] = 
                     cur.append(w)
             for k, ph in enumerate(phrases):
                 nxt = phrases[k + 1][0]["t"] if k + 1 < len(phrases) else s["at"] + s["dur"]
-                b = min(nxt, ph[-1]["end"] + 0.35)
-                add(ph[0]["t"], b, "Sub", "{\\fad(70,70)}" + _clean(" ".join(x["w"] for x in ph)))
+                a, b = ph[0]["t"], min(nxt, ph[-1]["end"] + 0.35)
+                anchor, fs = sub_spot(faces, a, b, lo, hi, tuple(band for h0, h1, band in hook_bands
+                                                                   if h0 < b and a < h1))
+                add(a, b, "Sub", f"{{\\an2\\pos({TEXT_CX},{anchor:.0f})\\fs{fs}\\fad(70,70)}}"
+                    + _clean(" ".join(x["w"] for x in ph)))
     elif mode == "build":
         for s in segs:
             # one screen per phrase: a new one at a sentence end, a pause, or 7 words
@@ -573,10 +765,14 @@ def build_ass(tl: Dict[str, Any], out: Path, face: Optional[Dict[str, float]] = 
                     cur.append(w)
             key = re.sub(r"[^\w]", "", (s.get("key") or "")).lower()
             for p, page in enumerate(pages):
-                lines, size = fit(" ".join(_clean(w["w"]).upper() for w in page), 188, 3, 120)
-                top = OH * 0.60 - block_height(len(lines), size) / 2
                 end_page = pages[p + 1][0]["t"] if p + 1 < len(pages) else s["at"] + s["dur"] - 0.05
                 end_page = min(end_page, page[-1]["end"] + 1.2)
+                shown_from = [w["t"] for w in page if w["t"] >= hook_end]
+                if not shown_from:
+                    continue
+                # one place for the whole page, clear of his face for as long as the page is up
+                lines, size, top = fit_clear(" ".join(_clean(w["w"]).upper() for w in page), 188, 3, 120,
+                                             lambda h: OH * 0.60 - h / 2, faces, shown_from[0], end_page, lo, hi)
                 for k, w in enumerate(page):
                     if w["t"] < hook_end:                 # the hook has the screen for its first seconds
                         continue
@@ -601,9 +797,10 @@ def build_ass(tl: Dict[str, Any], out: Path, face: Optional[Dict[str, float]] = 
         for s in segs:
             if not s.get("text"):
                 continue
-            lines, size = fit(_clean(s["text"]).upper(), 132, 3, 96)
-            top = top_text if top_text is not None else hook_top(len(lines), size, face, letterbox)
-            stack(max(s["at"], hook_end), s["at"] + s["dur"] - 0.05, "Meme", lines, size, top, "\\fad(60,60)")
+            a, b = max(s["at"], hook_end), s["at"] + s["dur"] - 0.05
+            want = top_text if top_text is not None else 400.0
+            lines, size, top = fit_clear(_clean(s["text"]).upper(), 132, 3, 96, lambda h: want, faces, a, b, lo, hi)
+            stack(a, b, "Meme", lines, size, top, "\\fad(60,60)")
     if not events:
         return False
     out.write_text("\n".join(head + events) + "\n", encoding="utf-8")
@@ -807,18 +1004,10 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
             looks = {m: f.result() for m, f in futures.items()}
         target = match_target(list(looks.values()))
         luts = {m: grade_lut(tl.get("grade") or "none", lk, target) for m, lk in looks.items()}
-        first = looks[segs[0]["moment"]]
 
-        # where the first shot's face sits on screen, so the hook stays off it (hair included)
-        face = None
-        if first["found"]:
-            src0 = sources[segs[0]["source"]]
-            M = affine(src0.w, src0.h, first["cx"], first["cy"], float(segs[0].get("zoom") or 1.0), 0, 0, 0)
-            cy_out = M[1, 0] * first["cx"] + M[1, 1] * first["cy"] + M[1, 2]
-            face = {"top": cy_out - first["face_h"] * 0.85 * M[1, 1],
-                    "bottom": cy_out + first["face_h"] * 0.55 * M[1, 1]}
+        # where his face is on screen in every frame, so no words ever go over it
         ass = work / "words.ass"
-        has_words = build_ass(tl, ass, face)
+        has_words = build_ass(tl, ass, FaceTrack(tl, sources, looks))
 
         sat = GRADES.get(tl.get("grade") or "none", GRADES["none"]).get("sat", 1.0)
         vf = []
