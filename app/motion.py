@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from . import captions
+from . import captions, framing, textdetect
 from .config import (BASE_DIR, CLIP_DIR, RENDER_H, RENDER_W, SAFE_BOTTOM, SAFE_LEFT, SAFE_RIGHT,
                      SAFE_TOP, THUMB_DIR, WORK_DIR)
 from .framing import FramingPlan
@@ -62,6 +62,9 @@ MAX_ZOOM = 1.22             # beyond this the upscale gets visibly soft
 LETTERBOX_LUMA = 28         # a row with nothing brighter than this is a black bar
 LETTERBOX_MIN = 0.90        # picture shorter than this share of the frame: zoom past the bars
 LETTERBOX_MAX_ZOOM = 1.9    # but never further than this
+TEXT_MAX_ZOOM = 1.35        # how far a crop may tighten to leave the creator's burned-in words out
+TEXT_EDGE = 26              # output px kept between burned-in words and the frame's edge (shake, rotation)
+SPLIT_TOP = 864             # the split layout: facecam panel height; the content gets the rest
 
 
 # --- small maths ------------------------------------------------------------
@@ -576,7 +579,12 @@ def _hold_path(target: np.ndarray, fps: float, seed: Optional[float], dz: float,
 
 
 def plan_camera(tl: Timeline, an: Analysis, size: Tuple[int, int], edits: Dict[str, Any],
-                layout: str, energy: Optional[np.ndarray]) -> Camera:
+                layout: str, energy: Optional[np.ndarray],
+                text: Optional[List[Tuple[float, float, float, float, int, int]]] = None,
+                zoom_cap: Optional[float] = None) -> Camera:
+    """`text`: the creator's burned-in words as (x0, y0, x1, y1 source px, first, last source frame):
+    a fill crop is moved so it never cuts through them (stats["text"] says how, or that it can't).
+    `zoom_cap`: the most the camera may punch in (keeps words near a whole-frame layout's edges)."""
     W, H = size
     fps = float(tl.fps)
     src = tl.src_index()
@@ -786,12 +794,21 @@ def plan_camera(tl: Timeline, an: Analysis, size: Tuple[int, int], edits: Dict[s
                 pic_top[a:b], pic_bot[a:b] = top * H, bot * H
         zoom = np.clip(zoom, 1.0, LETTERBOX_MAX_ZOOM * 1.05)
 
+    if zoom_cap is not None:
+        zoom = np.minimum(zoom, max(1.0, float(zoom_cap)))
+
     # 4. Keep the window inside the picture at every zoom level.
     half_w = cw / (2 * zoom)
     half_h = ch / (2 * zoom)
     cx = np.clip(cx, half_w, W - half_w)
     cy = np.clip(cy, np.maximum(half_h, pic_top + half_h), np.maximum(np.maximum(half_h, pic_top + half_h),
                                                                      np.minimum(H - half_h, pic_bot - half_h)))
+
+    # 4b. The creator's own words burned into the picture: never cut through them.
+    text_stats: Dict[str, Any] = {}
+    if text and layout == "fill" and auto:
+        text_stats = _fit_text(tl, an, size, cw, ch, cx, cy, zoom, bounds, src, text,
+                               allow_zoom=motion)
 
     # 5. Motion blur where the camera moves fast (180-degree shutter).
     blur = np.ones(N, dtype=np.int32)
