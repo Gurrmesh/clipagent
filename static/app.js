@@ -164,7 +164,7 @@ function renderStatus() {
 async function refreshWorking() {
   try {
     const { videos } = await api('/api/videos?limit=30');
-    const n = videos.filter(v => v.status === 'running' || v.status === 'queued').length;
+    const n = videos.filter(v => (v.status === 'running' || v.status === 'queued') && v.paused !== 'youtube').length;
     $('nav-working').textContent = n;
     $('nav-working').classList.toggle('hidden', !n);
     $('nav-working').title = `${n} working`;
@@ -391,9 +391,11 @@ $('go').addEventListener('click', async () => {
     if (links.length > 1) {
       if (links.length > 25) throw new Error('25 links at a time is the limit');
       const s = settings();
-      await post('/api/batch', { urls: links, settings: { ...s, platforms: chosenPlatforms() } });
+      const r = await post('/api/batch', { urls: links, settings: { ...s, platforms: chosenPlatforms() } });
       urlBox.value = ''; autoGrow(urlBox);
-      toast(`${links.length} videos queued — they run one after another`);
+      toast(r.waits_for_youtube
+        ? `${links.length} videos queued — the ${r.waits_for_youtube} YouTube link${r.waits_for_youtube === 1 ? '' : 's'} wait while YouTube downloads are paused`
+        : `${links.length} videos queued — they run one after another`);
       location.hash = '#/videos';
     } else {
       const form = new FormData();
@@ -412,6 +414,7 @@ $('go').addEventListener('click', async () => {
    Video lists: recent (Make clips page), all (My videos), per campaign
    ===================================================================== */
 const STATUS_TAG = (v) => {
+  if (v.paused === 'youtube') return '<span class="tag warn">Paused</span>';
   if (v.status === 'running' || v.status === 'queued')
     return `<span class="tag accent">${v.status === 'queued' || /waiting|queued/i.test(v.stage || '') ? 'Waiting' : `Working ${v.progress || 0}%`}</span>`;
   if (v.status === 'failed') return '<span class="tag bad">Didn’t work</span>';
@@ -427,26 +430,85 @@ function sourceName(src) {
 function niceTitle(v) {
   const t = (v.title || '').trim();
   if (t && !/^https?:\/\//.test(t)) return t.replace(/\.(mp4|mov|mkv|webm|m4v|avi)$/i, '');
-  if (v.status === 'running' || v.status === 'queued') return 'Getting the video…';
+  if ((v.status === 'running' || v.status === 'queued') && !v.paused) return 'Getting the video…';
   const host = sourceName(v.source || t);
   return host ? `Video from ${host}` : 'Untitled video';
 }
 function vcard(v, opts = {}) {
-  const working = v.status === 'running' || v.status === 'queued';
+  const paused = v.paused === 'youtube';                    // waiting for YouTube: saved, not working
+  const working = (v.status === 'running' || v.status === 'queued') && !paused;
   const title = niceTitle(v);
   const camp = !opts.noCampaign && v.campaign && v.campaign.name ? `<span class="tag" title="${esc(v.campaign.name)}">${esc(v.campaign.name)}</span>` : '';
+  const why = paused ? 'Waiting for YouTube — the link is saved and runs when YouTube downloads start again.'
+    : v.paused === 'restart' ? 'Kept when ClipAgent restarted — runs again by itself.' : '';
   return `<a class="vcard" href="#/video/${v.id}">
     <div class="poster">${v.poster ? `<img src="${v.poster}" alt="" loading="lazy" onerror="this.replaceWith(document.createRange().createContextualFragment(PH_ICON))">` : working ? '<span class="spin"></span>' : PH_ICON}</div>
     <div>
       <div class="t" title="${esc(title)}">${esc(title)}</div>
       <div class="facts">${STATUS_TAG(v)}${camp}</div>
       ${working ? `<div class="mini-bar"><i style="width:${v.progress || 0}%"></i></div>` : ''}
-      ${v.status === 'failed' && v.error ? `<div class="why">${esc(v.error)}</div>` : `<div class="when">${ago(v.created_at)}${v.duration ? ` — from ${mins(v.duration)} of video` : ''}</div>`}
+      ${why ? `<div class="wait">${esc(why)}</div>` : v.status === 'failed' && v.error ? `<div class="why">${esc(v.error)}</div>` : `<div class="when">${ago(v.created_at)}${v.duration ? ` — from ${mins(v.duration)} of video` : ''}</div>`}
     </div>
   </a>`;
 }
-let VIDEOS = [], VFILTER = 'all';
-async function fetchVideos() { const { videos } = await api('/api/videos?limit=120'); VIDEOS = videos; return videos; }
+let VIDEOS = [], VFILTER = 'all', PAUSE = null;
+async function fetchVideos() {
+  const { videos, pause } = await api('/api/videos?limit=120');
+  VIDEOS = videos; PAUSE = pause || null; renderPause();
+  return videos;
+}
+
+/* YouTube's "prove you're not a robot": YouTube downloads paused, links saved, one banner on
+   Make clips and My videos with what happened, what helps, and Try again now. */
+const clockAt = (ts) => ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+function pauseHTML(p) {
+  if (!p.paused) {        // the pause was lifted and the saved links are running again
+    return `<div class="dl-pause-body"><b>Trying the saved YouTube links again</b>
+      <p>${p.waiting} link${p.waiting === 1 ? '' : 's'} still to go, one after another. If YouTube asks for the robot check again, they stay paused.</p></div>`;
+  }
+  const n = p.waiting || 0;
+  const msg = esc(p.message || '').replace('Settings shows how', '<a href="#/settings">Settings shows how</a>');
+  const auto = p.resuming ? 'Trying the saved links again now…'
+    : p.auto_retry_at ? `ClipAgent tries one link again by itself at about ${clockAt(p.auto_retry_at)}.`
+    : 'ClipAgent already tried one link again by itself and YouTube still said no, so it won’t keep trying. Press Try again now when you’re ready.';
+  return `<span class="dl-pause-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="6.5" y="5" width="4" height="14" rx="1.2"/><rect x="13.5" y="5" width="4" height="14" rx="1.2"/></svg></span>
+    <div class="dl-pause-body">
+      <b>YouTube downloads are paused${p.since_ts ? ` since ${clockAt(p.since_ts)}` : ''}</b>
+      <p>${msg}</p>
+      <p class="hint">${n ? `${n} YouTube link${n === 1 ? ' is' : 's are'} waiting. ` : ''}Twitch, Kick and TikTok links and uploaded files keep going. ${esc(auto)}</p>
+      <div class="dl-pause-actions"><button type="button" class="btn small" data-act="resume" ${p.resuming ? 'disabled' : ''}>Try again now</button></div>
+    </div>`;
+}
+function renderPause() {
+  const p = PAUSE;
+  const show = !!p && (p.paused || (p.resuming && p.waiting > 0));
+  ['dlpause-make', 'dlpause-videos'].forEach(id => {
+    const el = $(id);
+    el.classList.toggle('hidden', !show);
+    el.classList.toggle('lifting', !!show && !p.paused);
+    const html = show ? pauseHTML(p) : '';
+    if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
+  });
+}
+async function resumeYouTube(btn) {
+  const done = btn ? busy(btn, 'Trying…') : () => {};
+  try {
+    const r = await post('/api/downloads/resume');
+    toast(!r.started ? 'Already trying the saved links again'
+      : r.waiting_all ? 'Trying again — the saved links run one after another' : 'YouTube downloads unpaused');
+    PAUSE = r; renderPause();
+    if (location.hash === '#/videos') loadVideos();
+    else if (/^#\/video\//.test(location.hash)) { if (currentJob) watchJob(currentJob.id); }
+    else loadRecent();
+  } catch (err) { toast(err.message, true); }
+  finally { done(); }
+}
+['dlpause-make', 'dlpause-videos'].forEach(id => $(id).addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-act="resume"]');
+  if (btn) resumeYouTube(btn);
+  if (ev.target.closest('a[href="#/settings"]'))      // straight to the cookies help
+    setTimeout(() => $('set-youtube-card').scrollIntoView({ behavior: 'smooth', block: 'start' }), 120);
+}));
 function keepPolling(render) {
   clearInterval(listPoll);
   if (VIDEOS.some(v => v.status === 'running' || v.status === 'queued'))
@@ -524,7 +586,10 @@ function renderVideoHead(job) {
   const ready = main.filter(c => c.status === 'ready').length;
   const tags = [];
   if (job.campaign) tags.push(`<a class="tag accent" href="#/campaign/${job.campaign.id}">${esc(job.campaign.name)}</a>`);
-  if (job.duration) tags.push(`<span class="tag">${mins(job.duration)} video</span>`);
+  const whole = (job.source_meta || {}).duration;
+  if (job.duration && streamParts(job).length && whole > job.duration + 60)
+    tags.push(`<span class="tag" title="Only its best parts were downloaded">${mins(job.duration)} picked from a ${mins(whole)} stream</span>`);
+  else if (job.duration) tags.push(`<span class="tag">${mins(job.duration)} video</span>`);
   if (main.length) {
     const groups = { ready: 0, look: 0, working: 0, failed: 0 };
     main.forEach(c => groups[clipGroup(c)]++);
@@ -580,14 +645,18 @@ function renderProgress(job) {
   }).join('');
   $('barfill').style.width = `${failed ? 100 : job.progress || 0}%`;
   $('stagetext').textContent = failed ? (job.error || 'It didn’t work.') : (job.stage || 'Working…');
-  $('pct').textContent = failed ? '' : `${job.progress || 0}%`;
-  $('retry').classList.toggle('hidden', !(failed && (job.can_retry || job.can_refetch)));
-  $('retry').textContent = job.can_retry ? 'Try again — no new download' : 'Try again';
+  $('pct').textContent = failed || job.paused ? '' : `${job.progress || 0}%`;
+  // Waiting for YouTube (the robot check): the link is saved; Try again now lifts the pause.
+  const waitsForYouTube = job.paused === 'youtube' && !!(job.pause && job.pause.paused);
+  box.classList.toggle('paused', job.paused === 'youtube');
+  $('retry').classList.toggle('hidden', !((failed && (job.can_retry || job.can_refetch)) || waitsForYouTube));
+  $('retry').textContent = waitsForYouTube ? 'Try YouTube again now' : job.can_retry ? 'Try again — no new download' : 'Try again';
   const raw = failed && job.error_detail && job.error_detail !== job.error ? job.error_detail : '';
   $('err-detail').classList.toggle('hidden', !raw);
   $('err-raw').textContent = raw;
 }
-$('retry').addEventListener('click', () => rerun('Trying again from the copy already downloaded'));
+$('retry').addEventListener('click', () => currentJob && currentJob.paused === 'youtube'
+  ? resumeYouTube($('retry')) : rerun('Trying again from the copy already downloaded'));
 $('rerun').addEventListener('click', () => rerun('Running it again — same video, fresh picks'));
 async function rerun(msg) {
   if (!currentJob) return;
@@ -611,6 +680,15 @@ $('planposts').addEventListener('click', async () => {
 });
 
 /* The long video as a strip, with each clip's piece of it marked. */
+/* A long stream comes as its best parts joined end to end: where each part sits, and the
+   stream's own clock for a time in the joined video ("from 2:14:05 in the stream"). */
+function streamParts(job) { const s = (job && job.source_meta && job.source_meta.sections) || []; return s.length > 1 ? s : []; }
+const hms = (s) => s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}` : fmt(s);
+function streamTime(job, t) {
+  const parts = streamParts(job);
+  const s = parts.find((p, i) => t >= p.source_start - 1e-6 && (t < p.source_end || i === parts.length - 1));
+  return s ? s.vod_start + (t - s.source_start) : null;
+}
 function renderStrip(job) {
   const main = job.clips.filter(c => !c.alt_of);
   const wrap = $('strip-wrap');
@@ -618,17 +696,23 @@ function renderStrip(job) {
   wrap.classList.remove('hidden');
   $('strip-len').textContent = fmt(job.duration);
   const D = job.duration;
+  const parts = streamParts(job);
   let html = '';
   for (let m = 10 * 60; m < D; m += 10 * 60) html += `<span class="tick" style="left:${(m / D) * 100}%"></span>`;
+  parts.slice(1).forEach(s => { html += `<span class="join" style="left:${(s.source_start / D) * 100}%" title="Jump to a later part of the stream"></span>`; });
   main.forEach(c => {
     const spans = c.parts && c.parts.length > 1 ? c.parts : [{ start: c.start, end: c.end }];
     spans.forEach((p, i) => {
       const w = Math.max(0.4, ((p.end - p.start) / D) * 100);
+      const orig = streamTime(job, p.start);
       html += `<span class="m ${HL === c.id ? 'hl' : ''}" data-id="${c.id}" style="left:${(p.start / D) * 100}%;width:${w}%"
-        title="Clip ${c.rank}: ${fmt(p.start)}–${fmt(p.end)}">${i === 0 ? c.rank : ''}</span>`;
+        title="Clip ${c.rank}: ${fmt(p.start)}–${fmt(p.end)}${orig !== null ? ` — from ${hms(orig)} in the stream` : ''}">${i === 0 ? c.rank : ''}</span>`;
     });
   });
   $('strip').innerHTML = html;
+  const note = (job.source_meta || {}).sections_note || '';
+  $('strip-note').textContent = note;
+  $('strip-note').classList.toggle('hidden', !note);
   $('strip').querySelectorAll('.m').forEach(el => el.addEventListener('click', () => {
     HL = el.dataset.id; renderStrip(currentJob); renderResults(currentJob);
     document.querySelector(`.clip[data-id="${HL}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -703,6 +787,8 @@ function clipCard(c, job) {
   if (c.alt_of) facts.push(`<span class="tag">Second version</span>`);
   else if (c.parts && c.parts.length > 1) facts.push(`<span class="tag">Stitched</span>`);
   if (c.post && c.post.platform) facts.push(`<span class="tag" title="The platform this clip's length and caption suit best">For ${esc(PLAT_NAMES[c.post.platform] || c.post.platform)}</span>`);
+  const orig = streamTime(job, c.start);
+  if (orig !== null) facts.push(`<span class="tag" title="Where this clip starts in the original stream">From ${hms(orig)} in the stream</span>`);
   let overlayBadge = '';
   if (c.status === 'failed') overlayBadge = '<div class="gate failed">Didn’t render</div>';
   else if (isCamp && gate) overlayBadge = `<div class="gate ${gate}">${GATE_LABEL[gate]}</div>`;
@@ -2049,6 +2135,23 @@ function renderSettings() {
   $('set-keys').innerHTML = `
     <div class="set-row"><span class="dot ${k.claude ? 'ok' : 'bad'}"></span>Claude — ${k.claude ? 'connected' : 'missing: add ANTHROPIC_API_KEY to the .env file'}</div>
     <div class="set-row"><span class="dot ${k.whisper ? 'ok' : 'bad'}"></span>Transcription — ${k.whisper ? 'connected' : 'missing: add WHISPER_API_KEY to the .env file'}</div>`;
+  renderYouTubeSettings();
+}
+/* How to get past "prove you're not a robot" the allowed way: gs's own spare account's cookies. */
+function renderYouTubeSettings() {
+  const y = CONFIG.youtube || {};
+  const now = y.kind === 'browser' ? `<div class="set-row"><span class="dot ok"></span>Using the YouTube sign-in from ${esc(cap(y.browser || 'your browser'))}.</div>`
+    : y.kind === 'file' ? (y.ok ? '<div class="set-row"><span class="dot ok"></span>Using your cookies file.</div>'
+      : '<div class="set-row"><span class="dot bad"></span>The cookies file named in .env (YTDLP_COOKIES) isn’t there — check the path.</div>')
+    : '<div class="set-row"><span class="dot"></span>No cookies set up — fine until YouTube asks this PC to prove it’s not a robot.</div>';
+  $('set-youtube').innerHTML = `${now}
+    <p class="hint">If YouTube keeps asking this PC to prove it’s not a robot, ClipAgent pauses YouTube downloads and keeps your links. Waiting an hour or two usually clears it. To skip the wait, let ClipAgent download as a signed-in viewer — <b>use a spare YouTube account, never your main one</b> (YouTube can flag accounts that download a lot).</p>
+    <ol class="set-steps">
+      <li>In <b>Firefox</b>, sign in to YouTube with the spare account. (Chrome and Edge lock their sign-ins on Windows, so ClipAgent can’t read them.)</li>
+      <li>Open the <b>.env</b> file in the ClipAgent folder and add this line: <code>YTDLP_COOKIES_FROM_BROWSER=firefox</code></li>
+      <li>Close ClipAgent and open it again, then press <b>Try again now</b> on My videos.</li>
+    </ol>
+    <p class="hint">Have a cookies.txt file exported from the spare account instead? Put it in the ClipAgent folder and add <code>YTDLP_COOKIES=C:\\path\\to\\cookies.txt</code> to .env. Cookies run out after a while — if the pause comes back, sign in again or export a fresh file. Uploading the video file always works.</p>`;
 }
 /* Brand choices live in this browser, so they survive a reload and every run uses them. */
 const BRAND_KEY = 'ca-brand';

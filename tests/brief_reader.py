@@ -300,8 +300,11 @@ def main_test() -> None:
     dummy.write_bytes(b"\0" * 4096)
     calls = []
 
+    def fake_info(url):                    # what the site says about the video, before downloading it
+        return {"upload_date": DATES[url], "title": "A TJR stream", "duration": 600.0,
+                "webpage_url": url, "extractor_key": "Youtube"}
+
     def fake_download(url, job_id, progress=None, **kw):
-        store.update_job(job_id, source_meta=json.dumps({"upload_date": DATES[url]}))
         return dummy, "A TJR stream"
 
     def no_audio_step(*a, **kw):
@@ -309,6 +312,7 @@ def main_test() -> None:
         raise RuntimeError("stopped after the date check")
 
     DATES = {"https://youtu.be/old": "20250312", "https://youtu.be/new": "20260203", "https://youtu.be/unk": ""}
+    media.read_info = fake_info
     media.download = fake_download
     media.probe = lambda p: {"duration": 600.0, "has_audio": True, "width": 1920, "height": 1080}
     media.extract_audio = no_audio_step

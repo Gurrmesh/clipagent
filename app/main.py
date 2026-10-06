@@ -20,8 +20,8 @@ from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, U
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import (brandlogo, campaign, captions, doctor, edits, instruct, media, money, notify, overlay, pipeline,
-               render, store, styles, transcribe)
+from . import (brandlogo, campaign, captions, doctor, downloads, edits, instruct, media, money, notify, overlay,
+               pipeline, render, store, styles, transcribe)
 from .config import (ANTHROPIC_API_KEY, BASE_DIR, CLIP_DIR, MAX_CLIPS, THUMB_DIR,
                      WHISPER_API_KEY, WORK_DIR)
 
@@ -177,6 +177,7 @@ def config() -> Dict[str, Any]:
         "has_logo": LOGO_PATH.exists(),
         "keys": {"claude": bool(ANTHROPIC_API_KEY), "whisper": bool(WHISPER_API_KEY)},
         "telegram": {"on": notify.enabled(), "connected": notify.connected()},
+        "youtube": media.cookie_status(),
         "recipes": [{"id": k, "name": r["name"], "what": r["what"], "when": r["when"],
                      "available": k in styles.available_recipes(1.0)}
                     for k, r in styles.RECIPES.items()],
@@ -249,7 +250,7 @@ async def create_job(
             raise HTTPException(400, f"Couldn't take that file: {exc}"[:300])
 
     background.add_task(pipeline.run_job, job_id, url, upload_path)
-    return {"job_id": job_id}
+    return {"job_id": job_id, "waits_for_youtube": bool(url) and media.youtube_paused(url)}
 
 
 @app.post("/api/batch")
@@ -276,11 +277,14 @@ def create_batch(background: BackgroundTasks, body: Dict[str, Any]) -> Dict[str,
         job_ids.append(job_id)
 
     def run_all():
+        # One after another. While YouTube downloads are paused, YouTube links wait (saved, not
+        # failed) and the rest carry on — pipeline.run_job sees to that.
         for job_id, url in zip(job_ids, urls):
             pipeline.run_job(job_id, url, None)
 
     background.add_task(run_all)
-    return {"batch_id": batch_id, "job_ids": job_ids}
+    return {"batch_id": batch_id, "job_ids": job_ids,
+            "waits_for_youtube": sum(1 for u in urls if media.youtube_paused(u))}
 
 
 @app.get("/api/batch/{batch_id}")
@@ -349,8 +353,25 @@ def videos(limit: int = 60) -> Dict[str, Any]:
             "source": full.get("source") or "",
             "poster": f"/media/thumb/{poster['id']}.jpg" if poster else None,
             "campaign": {"id": camp_id, "name": names.get(camp_id, "")} if camp_id else None,
+            # "youtube": waiting while YouTube downloads are paused; "restart": kept over a restart
+            "paused": (full.get("paused") or "") if j["status"] == "queued" else "",
         })
-    return {"videos": out}
+    return {"videos": out, "pause": downloads.status()}
+
+
+# --- the download pause (YouTube's "prove you're not a robot") -------------------------
+
+@app.get("/api/downloads")
+def download_pause() -> Dict[str, Any]:
+    """Is YouTube paused, why, since when, how many links wait, when ClipAgent tries by itself."""
+    return downloads.status()
+
+
+@app.post("/api/downloads/resume")
+def download_resume() -> Dict[str, Any]:
+    """"Try again now": lift the pause and run the saved links, oldest first. If the first one
+    meets the robot check again, everything pauses again."""
+    return downloads.try_again_now()
 
 
 @app.get("/api/jobs/{job_id}")
@@ -368,7 +389,11 @@ def job_detail(job_id: str) -> Dict[str, Any]:
         "progress": job["progress"],
         "duration": job["duration"],
         "error": friendly_error(job["error"]),
-        "error_detail": _ANSI.sub("", job["error"] or "")[:2000],
+        "error_detail": _ANSI.sub("", job.get("error_raw") or job["error"] or "")[:2000],
+        "paused": (job.get("paused") or "") if job["status"] == "queued" else "",
+        "pause": downloads.status() if job.get("paused") and job["status"] == "queued" else None,
+        # what the site said (upload date, channel, …); a long stream's downloaded parts in "sections"
+        "source_meta": store.source_meta(job),
         "framing": framing.get("note", ""),
         "created_at": job.get("created_at"),
         "source": job.get("source") or "",
@@ -423,6 +448,9 @@ def rerun_job(job_id: str, background: BackgroundTasks,
     new_id = store.create_job(title=title, source=job.get("source") or "upload", settings=settings)
     if camp.get("id"):
         store.update_job(new_id, campaign_id=camp["id"])
+    if have_copy and job.get("source_meta"):
+        # the same copy: the same facts — and for a long stream, the same parts (clips stay inside one)
+        store.update_job(new_id, source_meta=job["source_meta"])
     if have_copy:
         background.add_task(pipeline.run_job, new_id, None, source)
     else:                                       # the download itself failed: fetch it again
@@ -1222,7 +1250,8 @@ TG_HELP = ("<b>What I can do</b>\n"
            "(<code>/change all bigger captions</code>)\n"
            "/edit velocity his biggest wins — a music edit of the last video, with your last song "
            "(styles: velocity, aura, flow, cinematic, motivation, funny, money)\n"
-           "/retry — try the last failed video again")
+           "/retry — try the last failed video again\n"
+           "/resume — YouTube downloads paused? Try them again now")
 
 
 def _tg_worker() -> None:
@@ -1290,8 +1319,11 @@ def _tg_start_links(text: str) -> str:
         job_id = store.create_job(title=url, source=url, settings=settings)
         if camp:
             store.update_job(job_id, campaign_id=camp["id"])
+        waits = media.youtube_paused(url)
         ahead = _tg_enqueue(job_id, url)
         where = "starting now" if ahead <= 1 else f"#{ahead} in line"
+        if waits:                        # YouTube's robot check: saved, runs when downloads start again
+            where = "saved — YouTube downloads are paused right now, so it runs when they start again"
         lines.append(f"👍 Got it{note} — {settings['max_clips']} clips, {where}.\n{notify.esc(url)}")
     if words and not camp:
         lines.append("<i>(No campaign matched those words, so it's a normal run.)</i>")
@@ -1301,8 +1333,13 @@ def _tg_start_links(text: str) -> str:
 
 def _tg_status() -> str:
     jobs = store.list_jobs(10)
-    active = [j for j in jobs if j["status"] in ("running", "queued")]
+    waiting = set(downloads.waiting_ids())
+    active = [j for j in jobs if j["status"] in ("running", "queued") and j["id"] not in waiting]
     lines = []
+    pause = downloads.status()
+    if pause["paused"]:
+        lines.append(f"⏸ <b>YouTube downloads are paused</b> (the robot check) — {pause['waiting']} link"
+                     f"{'s' if pause['waiting'] != 1 else ''} saved. Send /resume to try again now.\n")
     if active:
         lines.append("<b>Working on</b>")
         for j in active:
@@ -1331,6 +1368,8 @@ def _tg_retry() -> str:
         return "That one is a clip-bank run — retry it from ClipAgent."
     if source and Path(source).exists():
         new_id = store.create_job(title=job["title"], source=job.get("source") or "upload", settings=settings)
+        if job.get("source_meta"):               # same copy, same facts (and a long stream's parts)
+            store.update_job(new_id, source_meta=job["source_meta"])
         _tg_enqueue(new_id, None, source)
     elif url:
         new_id = store.create_job(title=url, source=url, settings=settings)
@@ -1340,6 +1379,21 @@ def _tg_retry() -> str:
     if job.get("campaign_id"):
         store.update_job(new_id, campaign_id=job["campaign_id"])
     return f"🔁 Trying <b>{notify.esc((job.get('title') or '')[:80])}</b> again."
+
+
+def _tg_resume() -> str:
+    """/resume — the "Try again now" button: YouTube downloads paused by the robot check, tried again."""
+    before = downloads.status()
+    if not before["paused"] and not before["waiting_all"]:
+        return "Nothing is paused — YouTube downloads are running normally."
+    out = downloads.try_again_now()
+    if not out["started"]:
+        return "Already trying the saved links again — I'll message you if YouTube stops them."
+    n = before["waiting_all"]
+    return (f"🔁 Trying again — the {n} saved link{'s' if n != 1 else ''} run one after another. "
+            "If YouTube still asks this PC to prove it's not a robot, they stay paused — /status shows it, "
+            "and I'll message you when YouTube downloads work again."
+            if n else "🔁 YouTube downloads unpaused. Send a link whenever you like.")
 
 
 def telegram_command(text: str) -> Optional[str]:
@@ -1364,6 +1418,8 @@ def telegram_command(text: str) -> Optional[str]:
         return None
     if low.startswith("/retry"):
         return _tg_retry()
+    if low.startswith("/resume"):
+        return _tg_resume()
     if low.startswith("/edit"):
         word = (low.split() + ["", ""])[1]
         if not word or edits.ALIASES.get(word, word) in edits.STYLES:
@@ -1572,6 +1628,14 @@ def _settle_interrupted_jobs() -> None:
     for job in store.list_jobs(200):
         if job["status"] not in ("running", "queued"):
             continue
+        if job["status"] == "queued":
+            full = store.get_job(job["id"]) or {}
+            if full.get("paused"):
+                continue                 # waiting for YouTube: still waiting, still saved
+            if str(full.get("source") or "").startswith("http"):
+                # a link that hadn't started yet keeps its place and runs again (downloads.start)
+                store.update_job(job["id"], paused="restart", stage=downloads.RESTART_STAGE)
+                continue
         if (job.get("stage") or "").startswith("Done"):
             store.update_job(job["id"], status="done", progress=100)
         else:
@@ -1584,6 +1648,7 @@ def _settle_interrupted_jobs() -> None:
 def _start_telegram() -> None:
     _settle_interrupted_jobs()
     edits.settle_interrupted()
+    downloads.start()            # links kept over the restart run again; YouTube's pause keeps its clock
     money.start()
     if notify.start(telegram_command):
         print("Telegram updates are on" + ("" if notify.connected() else

@@ -121,7 +121,11 @@ MIGRATIONS = {
         # the version before the last change, so it can be undone (instruct.snapshot)
         "undo": "TEXT",
     },
-    "jobs": {"source_hash": "TEXT", "framing": "TEXT", "batch_id": "TEXT", "campaign_id": "TEXT"},
+    "jobs": {"source_hash": "TEXT", "framing": "TEXT", "batch_id": "TEXT", "campaign_id": "TEXT",
+             # downloads: what the site said about the video (upload date, channel, … and for a long
+             # stream the parts that were downloaded), why a queued link is waiting ("youtube" while
+             # YouTube downloads are paused, "restart" after ClipAgent restarted), yt-dlp's own error
+             "source_meta": "TEXT", "paused": "TEXT", "error_raw": "TEXT"},
     # the edit maker: the campaign gate's verdict, and the version before the last change (for Undo)
     "edits": {"compliance": "TEXT", "undo": "TEXT"},
 }
@@ -183,6 +187,24 @@ def list_jobs(limit: int = 30) -> List[Dict[str, Any]]:
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def waiting_jobs() -> List[Dict[str, Any]]:
+    """Queued links that are waiting (YouTube paused, or ClipAgent restarted), oldest first."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id,title,source,status,stage,paused,created_at FROM jobs"
+            " WHERE status='queued' AND COALESCE(paused,'')!='' ORDER BY created_at ASC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def source_meta(job: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """A job's source facts (jobs.source_meta), {} when there are none."""
+    try:
+        meta = json.loads((job or {}).get("source_meta") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
 
 
 # --- clips ----------------------------------------------------------------
