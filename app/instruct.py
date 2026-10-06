@@ -22,7 +22,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import captions, highlights, render, store, styles, toolio, transcribe
+from . import captions, highlights, render, smartstitch, store, styles, toolio, transcribe
 from .config import CLAUDE_MODEL, DATA_DIR
 
 UNDO_DIR = DATA_DIR / "undo"
@@ -112,6 +112,7 @@ def describe(clip: Dict[str, Any], job: Dict[str, Any], segments: List[Dict[str,
                  + (f" ({framing.get('note')})" if framing.get("note") else "")
                  + f", camera moves {'on (' + e.get('motion_style', 'punchy') + ')' if e.get('motion', True) else 'off'}"
                  + f", pauses cut {'on' if e.get('tighten', True) else 'off'}")
+    lines += smartstitch.describe_lines(e)
     if e.get("spell"):
         lines.append("Word fixes already made: " + ", ".join(f"{k} → {v}" for k, v in e["spell"].items()))
     if clip.get("caption") or clip.get("hashtags"):
@@ -176,6 +177,19 @@ def _tool() -> Dict[str, Any]:
                       "items": {"type": "object", "properties": {"wrong": {"type": "string"},
                                                                  "right": {"type": "string"}},
                                 "required": ["wrong", "right"]}},
+        "teaser": {"type": "boolean", "description": "true: open the clip with a 1.5-3 s flash-forward of its best "
+                   "moment, then a quick rewind and the story. false: remove the teaser."},
+        "teaser_start": {"type": "number", "description": "Only with teaser true when the clip has no teaser ready: "
+                         "the best 1.5-3 s (whole sentences) inside the clip's payoff, absolute seconds."},
+        "teaser_end": {"type": "number"},
+        "teaser_quote": {"type": "string", "description": "The exact words said in that teaser."},
+        "inserts_on": {"type": "boolean", "description": "false: no inserts at all (proof shots, reactions, "
+                       "callbacks). true: put them back."},
+        "remove_inserts": {"type": "array", "items": {"type": "string"}, "description": "Remove only these "
+                           "inserts: their number as listed under the clip, or their kind (proof, reaction, callback)."},
+        "proof_at": {"type": "string", "description": "Show what he's talking about (the chart, the P&L, the number) "
+                     "from where it's on screen in this same video, when he says these words — copy his words, "
+                     "e.g. \"50k\"."},
         "post_caption": {"type": "string", "description": "New caption to post with the clip."},
         "hashtags": {"type": "array", "items": {"type": "string"}},
         "hook_style": {"type": "string", "enum": ["bold", "boxed", "neon"], "description": "Clip-bank clips only."},
@@ -227,9 +241,12 @@ events. Specific beats vague; never a teaser that hides the thing. Keep their wo
 band headline + captions), bubble (viewer-comment bubble + captions), stack (two people, one per panel), \
 classic (plain captions + hook). Switching to label/titlebar/bubble needs card_text; to wordpop or classic \
 needs a hook. A look the clip can't take is listed under the clip.
-- Things the controls can't do (add music or sound effects, B-roll, stickers, emojis flying in, \
-transitions, change voices, translate the speech, make a brand-new clip, post it for them) go in cant, in \
-plain words, with the closest thing you can do. Never pretend.
+- Teaser and inserts: "remove the teaser" → teaser false; "add a teaser" / "open on the best part" → teaser \
+true; "no inserts" → inserts_on false; "take out the reaction" → remove_inserts; "show the chart when he \
+says 50k" → proof_at "50k". Inserts only ever come from this same video.
+- Things the controls can't do (add music or sound effects, footage from other videos or stock B-roll, \
+stickers, emojis flying in, transitions, change voices, translate the speech, make a brand-new clip, post \
+it for them) go in cant, in plain words, with the closest thing you can do. Never pretend.
 - If you can't tell what they want, ask one short question and make no changes.
 - Campaign rules, when given, override everything: never change something the brief forbids — say so in cant.
 """
@@ -414,6 +431,9 @@ def plan_clip(clip: Dict[str, Any], change: Dict[str, Any], job: Dict[str, Any],
                 pass
         if change.get("motion_style") in ("punchy", "calm"):
             edits["motion_style"] = change["motion_style"]
+        smart_edits, smart_problems = smartstitch.plan_change(clip, e, change, words, job)
+        edits.update(smart_edits)
+        problems += smart_problems
         fixes = {}
         for f in toolio.as_list(change.get("fix_words")):
             f = toolio.as_dict(f)

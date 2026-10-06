@@ -122,6 +122,13 @@
                 <label class="toggle"><input id="opt-frame" type="checkbox" checked><span><b>Follow the speaker</b> Finds faces and facecams and keeps them in frame.</span></label>
                 <label class="toggle"><input id="opt-motion" type="checkbox" checked><span><b>Camera moves</b> Smooth reframes, punch-ins and zooms on the big moments.</span></label>
                 <label class="toggle"><input id="opt-structure" type="checkbox" checked><span><b>Two versions of each clip</b> One straight cut, one with the setup pulled in from earlier. The better one comes first.</span></label>
+                <label class="toggle"><input id="opt-inserts" type="checkbox" checked><span><b>Add proof shots and reactions</b> When he says “look at this chart”, show it from where it's on screen in the video; cut in a real laugh or the earlier line he refers back to.</span></label>
+                <div class="field teaser-field"><label for="opt-teaser">Open with a teaser of the best part</label>
+                  <select id="opt-teaser">
+                    <option value="decide">Let ClipAgent decide (it tries both and keeps the better)</option>
+                    <option value="always">Always, when a clip has a clear best moment</option>
+                    <option value="never">Never</option>
+                  </select></div>
                 <label class="toggle"><input id="opt-headline" type="checkbox" checked><span><b>Small headline at the top</b> Only for the classic caption looks.</span></label>
                 <label class="toggle"><input id="opt-logo" type="checkbox"><span><b>My logo watermark</b> Upload it in Settings.</span></label>
               </div>
@@ -783,6 +790,12 @@
   </div>
 
   <footer class="ed-foot">
+    <div id="ed-smartblock" class="hidden">
+      <div class="tl-head"><b>Added to this clip</b><span class="hint">Teaser and inserts, where they play. Remove one with ✕ — the clip is re-made without it.</span></div>
+      <div id="ed-smartbar" class="smart-bar" aria-hidden="true"></div>
+      <div id="ed-smartlist" class="smart-list"></div>
+      <div id="ed-smartnotes" class="hint"></div>
+    </div>
     <div id="ed-trimblock">
       <div class="tl-head"><b>Trim</b><span class="hint">Drag the handles or click a word. <kbd>[</kbd> and <kbd>]</kbd> cut at the playhead.</span><span id="tl-range" class="tl-range"></span></div>
       <div id="tl" class="timeline">

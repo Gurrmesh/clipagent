@@ -191,6 +191,26 @@ input[type=checkbox] { accent-color: var(--accent); width: 17px; height: 17px; f
 .toggle.small { padding: 6px 0; font-size: 13.5px; }
 .toggle.locked { opacity: .5; cursor: not-allowed; }
 .toggle.locked span::after { content: " — not allowed by this campaign"; color: var(--muted); }
+.teaser-field { padding: 6px 4px 2px; }
+.teaser-field select { width: 100%; max-width: 100%; }
+.tag.pop { background: var(--pop, #FFD400); color: #1a1a1a; }
+/* Smart Stitch strip in the editor: where the teaser and inserts play */
+.smart-bar { position: relative; height: 14px; border-radius: 7px; background: var(--line-2); margin: 6px 0 8px; overflow: hidden; }
+.smart-bar .sb { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+.sb.teaser, .smart-item.teaser .dot { background: #FFD400; }
+.sb.rewind { background: var(--muted); }
+.sb.proof, .smart-item.proof .dot { background: var(--accent); }
+.sb.reaction, .smart-item.reaction .dot { background: #27C46B; }
+.sb.callback, .smart-item.callback .dot { background: #FF7A45; }
+.smart-list { display: flex; flex-direction: column; gap: 6px; }
+.smart-item { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 13.5px; min-width: 0; }
+.smart-item .dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.smart-item .when { color: var(--muted); font-variant-numeric: tabular-nums; }
+.smart-item .what { color: var(--ink-2); flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
+.smart-item .x { margin-left: auto; border: 1px solid var(--line-2); background: var(--surface); border-radius: 8px; width: 32px; height: 32px; cursor: pointer; color: var(--ink); }
+.smart-item .x:hover { border-color: var(--accent); color: var(--accent); }
+.smart-item.off { color: var(--muted); }
+#ed-smartblock { margin-bottom: 10px; }
 
 .seg { display: inline-flex; padding: 3px; border-radius: var(--r-md); background: var(--sunken); gap: 3px; }
 .seg button { border: 0; background: transparent; padding: 8px 14px; border-radius: 8px; font-weight: 600; font-size: 14px; color: var(--muted); cursor: pointer; }

@@ -305,6 +305,8 @@ function settings() {
     motion: $('opt-motion').checked,
     structure: $('opt-structure').checked,
     alternates: $('opt-structure').checked,
+    teaser: $('opt-teaser').value,
+    inserts: $('opt-inserts').checked,
     headline: $('opt-headline').checked,
     doctor: $('opt-doctor').checked,
     logo: $('opt-logo').checked,
@@ -330,6 +332,8 @@ function applySettings(s) {
   $('opt-frame').checked = s.auto_frame !== false;
   $('opt-motion').checked = s.motion !== false;
   $('opt-structure').checked = s.structure !== false;
+  $('opt-inserts').checked = s.inserts !== false;
+  $('opt-teaser').value = ['decide', 'always', 'never'].includes(s.teaser) ? s.teaser : 'decide';
   $('opt-headline').checked = s.headline !== false;
   $('opt-doctor').checked = s.doctor !== false;
   $('opt-logo').checked = !!s.logo;
@@ -702,6 +706,10 @@ function clipCard(c, job) {
   if (style) facts.push(`<span class="tag accent">${esc(STYLE_NAME[style] || style)}</span>`);
   if (c.alt_of) facts.push(`<span class="tag">Second version</span>`);
   else if (c.parts && c.parts.length > 1) facts.push(`<span class="tag">Stitched</span>`);
+  const smart = (c.edits && c.edits.smart) || {};
+  if (smart.teaser) facts.push(`<span class="tag pop" title="Opens on its best moment, then rewinds to the start">Teaser</span>`);
+  const nIns = (smart.inserts || []).length;
+  if (nIns) facts.push(`<span class="tag pop" title="${esc((smart.inserts || []).map(i => i.name).join(', '))}">${nIns} insert${nIns === 1 ? '' : 's'}</span>`);
   if (c.post && c.post.platform) facts.push(`<span class="tag" title="The platform this clip's length and caption suit best">For ${esc(PLAT_NAMES[c.post.platform] || c.post.platform)}</span>`);
   let overlayBadge = '';
   if (c.status === 'failed') overlayBadge = '<div class="gate failed">Didn’t render</div>';
@@ -890,6 +898,7 @@ async function openEditor(clip, panel = 'ask') {
     $('ed-parts').innerHTML = clip.parts.map(p => `<div class="part"><span class="role">${esc(p.role || '')}</span>
       <span>${fmt(p.start)}–${fmt(p.end)} (${(p.end - p.start).toFixed(1)} s)</span>${p.label ? `<span class="lbl">${esc(p.label)}</span>` : ''}</div>`).join('');
   }
+  renderSmart(clip);
   $('ed-capon').checked = e.captions_on !== false;
   $('ed-tighten').checked = e.tighten !== false;
   $('ed-motion').checked = e.motion !== false;
@@ -942,6 +951,56 @@ async function openEditor(clip, panel = 'ask') {
     setTrim(clip.start, clip.end, false);
     drawTimeline(); renderWordStrip();
   } catch { /* the timeline is a nicety, not a blocker */ }
+}
+/* Smart Stitch: the teaser and inserts as coloured blocks on the clip's own
+   timeline, each removable with one click (the clip is re-made without it). */
+function renderSmart(clip) {
+  const e = clip.edits || {}, s = e.smart || {};
+  const items = [];
+  if (s.teaser) items.push({ key: 'teaser', kind: 'teaser', name: 'Teaser', a: s.teaser.out_start, b: s.teaser.out_end, text: s.teaser.quote });
+  if (s.rewind) items.push({ key: 'rewind', kind: 'rewind', name: 'Rewind', a: s.rewind.out_start, b: s.rewind.out_end });
+  (s.inserts || []).forEach(i => items.push({ key: i.id, kind: i.kind, name: i.name, a: i.out_start, b: i.out_end, text: i.quote }));
+  const spare = !s.teaser && e.teaser && e.teaser.start != null;
+  const parked = e.inserts_on === false && (e.inserts || []).length;
+  const notes = (s.notes || []).filter(Boolean);
+  const show = items.length || spare || parked || notes.length;
+  $('ed-smartblock').classList.toggle('hidden', !show);
+  if (!show) return;
+  const L = Math.max(1, s.length || clip.duration || 1);
+  $('ed-smartbar').innerHTML = items.map(it => `<span class="sb ${it.kind}" style="left:${(it.a / L) * 100}%;width:${Math.max(1.2, ((it.b - it.a) / L) * 100)}%"></span>`).join('');
+  $('ed-smartbar').classList.toggle('hidden', !items.length);
+  const rows = items.filter(it => it.kind !== 'rewind').map(it => `<div class="smart-item ${it.kind}">
+      <span class="dot"></span><b>${esc(it.name)}</b><span class="when">${fmt(it.a)}–${fmt(it.b)}</span>
+      ${it.text ? `<span class="what">“${esc(String(it.text).slice(0, 90))}”</span>` : ''}
+      <button type="button" class="x" data-rm="${esc(it.key)}" title="Remove the ${esc(it.name.toLowerCase())}" aria-label="Remove the ${esc(it.name.toLowerCase())}">✕</button></div>`);
+  if (spare) rows.push(`<div class="smart-item off"><b>Teaser ready</b><span class="what">“${esc(String(e.teaser.quote || '').slice(0, 90))}”</span>
+      <button type="button" class="btn ghost small" data-add="teaser">Add the teaser</button></div>`);
+  if (parked) rows.push(`<div class="smart-item off"><b>${e.inserts.length} insert${e.inserts.length === 1 ? '' : 's'} switched off</b>
+      <button type="button" class="btn ghost small" data-add="inserts">Put them back</button></div>`);
+  $('ed-smartlist').innerHTML = rows.join('');
+  $('ed-smartnotes').textContent = notes.join(' ');
+  $('ed-smartlist').querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', () => {
+    const k = b.dataset.rm;
+    smartRemake(k === 'teaser' ? { teaser_on: false } : { inserts: (e.inserts || []).filter(i => i.id !== k) }, b);
+  }));
+  $('ed-smartlist').querySelectorAll('[data-add]').forEach(b => b.addEventListener('click', () =>
+    smartRemake(b.dataset.add === 'teaser' ? { teaser_on: true } : { inserts_on: true }, b)));
+}
+async function smartRemake(change, btn) {
+  if (!currentClip) return;
+  const clip = currentClip;
+  const done = busy(btn, '…');
+  try {
+    await post(`/api/clips/${clip.id}/render`, change);
+    const updated = await waitForRender(clip.id);
+    if (currentClip && currentClip.id === clip.id && !$('drawer').classList.contains('hidden')) {
+      await openEditor(updated, document.querySelector('.ed-rail button.on')?.dataset.panel || 'ask');
+      $('ed-video').src = `${updated.video_url}?v=${Date.now()}`;
+    }
+    toast('Clip re-made — press Undo if you liked it better before');
+    if (currentJob) watchJob(currentJob.id);
+  } catch (err) { toast(err.message, true); }
+  finally { done(); }
 }
 function closeEditor(fromHistory = false) {
   if ($('drawer').classList.contains('hidden')) return;
@@ -1056,14 +1115,14 @@ function renderWordStrip() {
 $('ed-video').addEventListener('timeupdate', () => {
   const w = EDIT.wave, video = $('ed-video'), head = $('tl-playhead');
   if (!w || !currentClip) return;
-  if (currentClip.saved > 0 || (currentClip.parts || []).length > 1) { head.classList.add('hidden'); return; }
+  if (currentClip.saved > 0 || (currentClip.parts || []).length > 1 || ((currentClip.edits || {}).smart || {}).teaser) { head.classList.add('hidden'); return; }
   head.classList.remove('hidden');
   head.style.left = `${timeToX(currentClip.start + video.currentTime, $('tl').getBoundingClientRect().width)}px`;
 });
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape') { if (!$('kit').classList.contains('hidden')) closeKit(); else closeEditor(); return; }
   if ($('drawer').classList.contains('hidden') || /input|textarea|select/i.test(ev.target.tagName)) return;
-  if (!currentClip || (currentClip.parts || []).length > 1) return;
+  if (!currentClip || (currentClip.parts || []).length > 1 || ((currentClip.edits || {}).smart || {}).teaser) return;
   const at = currentClip.start + $('ed-video').currentTime;
   if (ev.key === '[') { setTrim(at, TRIM.end); toast(`Starts at ${fmt(at)}`); }
   if (ev.key === ']') { setTrim(TRIM.start, at); toast(`Ends at ${fmt(at)}`); }
@@ -1237,7 +1296,7 @@ async function waitForRender(clipId, timeout = 240000) {
 const ASK_EXAMPLES = ['Clip 1: make it shorter, keep the punchline', 'Bigger captions on every clip',
   'Clip 2: change the top text to …', 'All clips: karaoke captions', 'Clip 3: start one sentence earlier'];
 const ED_ASK_EXAMPLES = ['Shorter — keep the punchline', 'Start a sentence earlier', 'Bigger, yellow captions',
-  'New top text: …', 'Turn the camera moves off'];
+  'New top text: …', 'Turn the camera moves off', 'Remove the teaser', 'Show the chart when he says …'];
 let ASK_SCOPE = new Set(), ASK_POLL = null, ASKS = [];
 
 function fillExamples(box, list, target) {
@@ -1722,23 +1781,26 @@ $('cu-url').addEventListener('input', () => { autoGrow($('cu-url')); if (CAMP.sr
 
 /* Switches the brief forbids: off and greyed out, so what you see is what runs. */
 const SHARED_LOCKS = [['opt-tighten', 'cut'], ['opt-fillers', 'cut'], ['opt-frame', 'crop'], ['opt-motion', 'zoom'],
-  ['opt-motion', 'crop'], ['opt-structure', 'stitch'], ['opt-headline', 'hook'], ['opt-logo', 'watermark']];
+  ['opt-motion', 'crop'], ['opt-structure', 'stitch'], ['opt-inserts', 'stitch'], ['opt-headline', 'hook'], ['opt-logo', 'watermark']];
 let SHARED_SAVED = null;      // the Make page's own choices, put back when a campaign's locks come off
 function lockShared(card) {
   unlockShared();
-  SHARED_SAVED = { checks: Object.fromEntries(SHARED_LOCKS.map(([id]) => [id, $(id).checked])), layout: $('layout').value };
+  SHARED_SAVED = { checks: Object.fromEntries(SHARED_LOCKS.map(([id]) => [id, $(id).checked])), layout: $('layout').value, teaser: $('opt-teaser').value };
   const allowed = card.resolved.allowed;
   SHARED_LOCKS.forEach(([id, key]) => {
     if (!allowed[key]) { const el = $(id); el.checked = false; el.disabled = true; el.closest('label').classList.add('locked'); }
   });
   if (!allowed.crop) { $('layout').value = 'blur'; $('layout').disabled = true; }
+  if (!allowed.stitch) { $('opt-teaser').value = 'never'; $('opt-teaser').disabled = true; $('opt-teaser').title = 'Not allowed by this campaign — it doesn’t allow joining moments'; }
 }
 function unlockShared() {
   SHARED_LOCKS.forEach(([id]) => { const el = $(id); el.disabled = false; el.closest('label').classList.remove('locked'); });
   $('layout').disabled = false;
+  $('opt-teaser').disabled = false; $('opt-teaser').title = '';
   if (SHARED_SAVED) {
     Object.entries(SHARED_SAVED.checks).forEach(([id, on]) => { $(id).checked = on; });
     $('layout').value = SHARED_SAVED.layout;
+    $('opt-teaser').value = SHARED_SAVED.teaser || 'decide';
     SHARED_SAVED = null;
   }
 }
