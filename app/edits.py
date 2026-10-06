@@ -2175,8 +2175,12 @@ def run(eid: str, repick: bool = True) -> None:
             EDIT_DIR.mkdir(parents=True, exist_ok=True)
             out = EDIT_DIR / f"{eid}.mp4"
             thumb = EDIT_DIR / f"{eid}.jpg"
-            editrender.render(plan["timeline"], sources, sound, out, thumb,
-                              progress=lambda p: _stage(eid, f"Rendering — {p}%", 25 + int(p * 0.7)))
+            made = editrender.render(plan["timeline"], sources, sound, out, thumb,
+                                     progress=lambda p: _stage(eid, f"Rendering — {p}%", 25 + int(p * 0.7)))
+            if (made or {}).get("notes"):           # e.g. "Moved the frame so the title at the top isn't cut off."
+                tl_notes = plan["timeline"].get("notes") or []
+                plan["timeline"]["notes"] = tl_notes + [n for n in made["notes"] if n not in tl_notes]
+                store.update_edit(eid, plan=plan)
             store.update_edit(eid, file=str(out), thumb=str(thumb), stage="Checking it", progress=97)
             verdict = gate(eid)
             store.update_edit(eid, status="done", stage="Done", progress=100, error="")

@@ -21,7 +21,12 @@ from .config import WORK_DIR
 from .media import probe, run
 
 SAMPLE_COUNT = 48          # frames sampled across the span
-MIN_FACE_FRACTION = 0.035  # ignore faces smaller than this share of frame width
+MIN_FACE_FRACTION = 0.035  # ignore faces smaller than this share of frame width (for following a speaker)
+FACECAM_MIN_FACE = 0.018   # a streamer's face in a small facecam can be this small and still be found
+# A facecam box shorter than this share of the frame height is "small": cropping around it would
+# leave a tiny face, so the clip gets the split layout (face big on top, the content below).
+# (A talking head filling a fifth of the frame height makes a box of ~0.40: not small.)
+SPLIT_MAX_BOX_H = 0.32
 
 
 @dataclass
@@ -49,9 +54,11 @@ class FramingPlan:
     confidence: float = 0.0
     note: str = ""
     two_shot: float = 0.0     # share of sampled frames with two people side by side
+    layout: str = ""          # the layout the last render actually used ("fill", "split", "blur", "stack")
+    text: List[Dict[str, Any]] = field(default_factory=list)   # big burned-in text it found (textdetect)
 
     def to_json(self) -> Dict[str, Any]:
-        return {
+        out = {
             "kind": self.kind,
             "facecam": self.facecam,
             "track": [[round(t, 2), round(x, 4)] for t, x in self.track],
@@ -59,6 +66,11 @@ class FramingPlan:
             "note": self.note,
             "two_shot": round(self.two_shot, 2),
         }
+        if self.layout:
+            out["layout"] = self.layout
+        if self.text:
+            out["text"] = self.text
+        return out
 
 
 # --- detection ------------------------------------------------------------
@@ -121,7 +133,9 @@ def sample_faces(source: Path, start: float, end: float, count: int = SAMPLE_COU
             if not ok or frame is None:
                 continue
             for (x, y, w, h) in detect(frame):
-                if w / width < MIN_FACE_FRACTION:
+                # plain floats: YuNet hands back float32, which the stored plan's JSON can't hold
+                x, y, w, h = float(x), float(y), float(w), float(h)
+                if w / width < FACECAM_MIN_FACE:
                     continue
                 faces.append(Face(t=t, x=x / width, y=y / height,
                                   w=w / width, h=h / height))
@@ -177,32 +191,56 @@ def plan_framing(
     if not faces:
         return FramingPlan(kind="none", note="No faces found — falling back to a centre crop.")
 
-    two = two_shot_share(faces, count)
+    two = two_shot_share([f for f in faces if f.w >= MIN_FACE_FRACTION], count)
     plan = _plan_from_faces(source, faces, count)
     plan.two_shot = two
     return plan
 
 
-def _plan_from_faces(source: Path, faces: List[Face], count: int) -> FramingPlan:
-    clusters = _cluster(faces)
-    main = clusters[0]
-    hit_rate = len(main) / max(1, count)
-    avg_w = sum(f.w for f in main) / len(main)
-    spread_x = max(f.cx for f in main) - min(f.cx for f in main)
-    spread_y = max(f.cy for f in main) - min(f.cy for f in main)
+def find_facecam(faces: List[Face], count: int, source_aspect: float,
+                 min_hits: float = 0.30) -> Optional[Dict[str, float]]:
+    """A webcam box around a face that is small, pinned in one place and there most of the
+    time (a stream's facecam), else None. The box carries "hit": the share of samples with it."""
+    for cluster in _cluster(faces)[:3]:
+        hit_rate = len({round(f.t, 2) for f in cluster}) / max(1, count)
+        avg_w = sum(f.w for f in cluster) / len(cluster)
+        spread_x = max(f.cx for f in cluster) - min(f.cx for f in cluster)
+        spread_y = max(f.cy for f in cluster) - min(f.cy for f in cluster)
+        if avg_w < 0.22 and spread_x < 0.10 and spread_y < 0.10 and hit_rate > min_hits:
+            box: Dict[str, float] = _facecam_box(cluster, source_aspect)
+            box["hit"] = round(min(1.0, hit_rate), 2)
+            return box
+    return None
 
-    # A facecam is small, pinned in place, and present most of the time.
-    is_facecam = avg_w < 0.22 and spread_x < 0.10 and spread_y < 0.10 and hit_rate > 0.30
-    if is_facecam:
-        info = probe(source)
-        aspect = (info["width"] / info["height"]) if info["height"] else 16 / 9
-        box = _facecam_box(main, aspect)
+
+def is_small_facecam(box: Optional[Dict[str, float]]) -> bool:
+    """A small webcam picture near the frame's edge (where streams put the facecam), small enough
+    that a crop around it would leave a tiny face: the split layout fits. A small face in the
+    middle of the frame is a person in a wide shot, not a facecam."""
+    if not box or float(box.get("h", 1.0)) > SPLIT_MAX_BOX_H:
+        return False
+    cx = float(box["x"]) + float(box["w"]) / 2
+    cy = float(box["y"]) + float(box["h"]) / 2
+    return cx < 0.3 or cx > 0.7 or cy < 0.3 or cy > 0.7
+
+
+def _plan_from_faces(source: Path, faces: List[Face], count: int) -> FramingPlan:
+    # A facecam is small, pinned in place, and present most of the time. Only a small one gets
+    # the split: a big webcam (or a talking head who holds still) is framed by following the face.
+    info = probe(source)
+    aspect = (info["width"] / info["height"]) if info["height"] else 16 / 9
+    box = find_facecam(faces, count, aspect)
+    if box and is_small_facecam(box):
+        hit_rate = box.pop("hit", 0.0)
         return FramingPlan(
             kind="facecam", facecam=box, confidence=min(1.0, hit_rate * 1.6),
             note=f"Facecam found in the {_corner(box)} of the frame, on {int(hit_rate * 100)}% of sampled frames.",
         )
 
     # Otherwise follow whoever is on screen.
+    faces = [f for f in faces if f.w >= MIN_FACE_FRACTION]
+    if not faces:
+        return FramingPlan(kind="none", note="No faces found — falling back to a centre crop.")
     track = _speaker_track(faces)
     if not track:
         return FramingPlan(kind="none", note="Faces were too scattered to track.")

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import (brandlogo, notify, campaign, compliance, downloads, framing, highlights, judge, media, overlay, render,
-               store, structure, styles, tighten, transcribe)
+               store, structure, styles, textdetect, tighten, transcribe)
 from . import doctor, lookcheck
 
 
@@ -651,6 +651,8 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
             guidance=campaign.picker_guidance(rules) if rules else "",
             platforms=settings.get("platforms") or None,
             creator=lookcheck.rules_of(rules)["creator"] if rules else "",
+            # moments whose big burned-in words would force the whole picture rank a little lower
+            text_risk=(lambda a, b: textdetect.text_risk(source, a, b)) if settings.get("auto_frame", True) else None,
         )
         if not clips:
             store.update_job(job_id, status="done", stage="No clip-worthy moments found",
