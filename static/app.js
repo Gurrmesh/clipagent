@@ -2268,6 +2268,7 @@ async function loadEditList() {
 /* ---------- one edit ---------- */
 let EE = { id: null, edit: null, poll: null, draft: {}, moments: null, video: '' };
 const EDIT_ASK_EXAMPLES = ['Faster', 'More flashes', 'Black and white', 'Put the line about … on the drop',
+  'Make the second moment shorter', 'End the first moment right after he says “…”', 'Make the whole thing 20 seconds',
   'Use a different song', 'Hook about …'];
 fillExamples($('ee-ask-examples'), EDIT_ASK_EXAMPLES, 'ee-ask-text');
 
@@ -2485,19 +2486,29 @@ function renderMoments(st) {
   const shown = st.text === 'punch' || st.text === 'quote' || st.text === 'meme';
   const list = EE.moments || [];
   $('ee-mcount').textContent = list.length ? `(${list.filter(m => !m.off).length} of ${list.length} on)` : '';
-  $('ee-moments').innerHTML = list.map((m, i) => `<div class="mrow ${m.off ? 'off' : ''} ${m.drop ? 'drop' : ''}" data-i="${i}">
+  const sizeLabel = (n) => n ? `${Math.abs(n) > 1 ? `${Math.abs(n)}× ` : ''}${n < 0 ? 'shorter' : 'longer'} — press Re-make` : '';
+  $('ee-moments').innerHTML = list.map((m, i) => `<div class="mrow ${m.off ? 'off' : ''} ${m.drop ? 'drop' : ''} ${m.left_out && !m.off ? 'leftout' : ''}" data-i="${i}">
       <img class="mthumb" src="${m.thumb}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">
       <div class="mmain">
         <input class="mtext" type="text" maxlength="160" value="${esc(m.text || '')}" placeholder="${shown ? 'No words on screen' : 'Words aren’t shown in this style'}" aria-label="Words on screen for this moment">
-        <div class="mmeta">${m.drop ? '<b>On the drop</b> · ' : ''}${m.length} s at ${fmt(m.start)} · ${esc(m.source_title || '')}</div>
+        <div class="mmeta">${m.drop ? '<b>On the drop</b> · ' : ''}${m.length} s at ${fmt(m.start)}${m.manual ? ' · sized by you' : ''} · ${esc(m.source_title || '')}</div>
+        ${m.left_out && !m.off ? `<div class="mwhy">Left out — ${esc(m.left_out)}</div>` : ''}
+        ${m.steps ? `<div class="mwhy msize">${esc(sizeLabel(m.steps))}</div>` : ''}
       </div>
       <div class="mctl">
         <button type="button" class="btn ghost small mdrop" ${m.drop ? 'disabled' : ''} title="Land this moment on the song’s drop">${m.drop ? 'On the drop' : 'Put on drop'}</button>
         <label class="toggle small"><input type="checkbox" class="mon" ${m.off ? '' : 'checked'}><span>On</span></label>
+        <button type="button" class="btn ghost small mshort" ${(m.steps || 0) <= -3 ? 'disabled' : ''} title="Cut this moment shorter — on whole words, keeping its punchline">Shorter</button>
+        <button type="button" class="btn ghost small mlong" ${(m.steps || 0) >= 3 ? 'disabled' : ''} title="Let this moment run longer — more of what he says before and after">Longer</button>
         <button type="button" class="btn ghost small mup" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button>
         <button type="button" class="btn ghost small mdown" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button>
       </div></div>`).join('');
   const changed = () => { EE.draft.moments = EE.moments.map(m => ({ id: m.id, text: m.text || '', off: !!m.off, drop: !!m.drop })); draftChanged(); };
+  const sized = () => {
+    const resize = EE.moments.filter(m => m.steps).map(m => ({ id: m.id, steps: m.steps }));
+    if (resize.length) EE.draft.resize = resize; else delete EE.draft.resize;
+    draftChanged();
+  };
   $('ee-moments').querySelectorAll('.mrow').forEach(row => {
     const i = +row.dataset.i, m = EE.moments[i];
     row.querySelector('.mtext').addEventListener('input', ev => { m.text = ev.target.value; changed(); });
@@ -2506,6 +2517,9 @@ function renderMoments(st) {
       m.off = !ev.target.checked; changed(); renderMoments(st);
     });
     row.querySelector('.mdrop').addEventListener('click', () => { EE.moments.forEach(x => { x.drop = x === m; }); m.off = false; changed(); renderMoments(st); });
+    const step = (d) => { m.steps = Math.max(-3, Math.min(3, (m.steps || 0) + d)); sized(); renderMoments(st); };
+    row.querySelector('.mshort').addEventListener('click', () => step(-1));
+    row.querySelector('.mlong').addEventListener('click', () => step(1));
     const move = (d) => { const j = i + d; [EE.moments[i], EE.moments[j]] = [EE.moments[j], EE.moments[i]]; changed(); renderMoments(st); };
     row.querySelector('.mup').addEventListener('click', () => move(-1));
     row.querySelector('.mdown').addEventListener('click', () => move(1));

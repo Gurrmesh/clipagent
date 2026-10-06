@@ -106,8 +106,9 @@ expect(all(b[0] > a[0] for a, b in zip(c, c[1:])), "keyframes run forward")
 
 # --- Velocity --------------------------------------------------------------------------------
 print("== Velocity, 128 BPM, 20 s")
-ms = moments(10, span=3.0, drop=4)
+ms = moments(10, span=3.0, drop=2)
 tl = edits.build_timeline(ms, "velocity", 20, S128, {}, WORDS, durations=DURS, hook="He turned 500 into 2 million")
+FIT = {m["id"]: m for m in tl["moments"]}                         # how each moment was cut
 segs = tl["segments"]
 s0 = tl["music"]["start"]
 expect(contiguous(tl), "segments follow each other with no gaps, up to the exact length")
@@ -116,8 +117,8 @@ expect(abs(tl["drop_at"] + s0 - 20.99) < EPS, "the drop is where the song drops"
 expect(any(abs(s["at"] - tl["drop_at"]) < EPS for s in segs), "a cut lands exactly on the drop")
 drop_seg = next(s for s in segs if s["drop"])
 drop_m = next(m for m in ms if m["drop"])
-expect(drop_seg["moment"] == drop_m["id"] and abs(drop_seg["src_start"] - drop_m["hit"]) < EPS,
-       "the drop moment's hit is the frame on the drop")
+expect(drop_seg["moment"] == drop_m["id"] and abs(drop_seg["src_start"] - FIT[drop_m["id"]]["hit"]) < EPS
+       and abs(FIT[drop_m["id"]]["hit"] - drop_m["hit"]) < EPS, "the drop moment's hit is the frame on the drop")
 expect(abs(tl["drop_at"] - 8 * P128) < EPS, "the song starts 8 beats before the drop")
 bars = tl["length"] / (4 * P128)
 expect(abs(bars - round(bars)) < 1e-3 and abs(tl["length"] - 20) <= 2 * P128 + EPS,
@@ -126,6 +127,8 @@ expect(abs(tl["music"]["end"] - tl["music"]["start"] - tl["length"]) < EPS and t
        "the song section is exactly as long as the edit")
 expect(all(s["dur"] >= P128 - EPS for s in segs), "no shot is shorter than a beat")
 expect(segs[-1]["dur"] >= 2 * P128 - EPS, "the last shot gets at least two beats")
+expect(all(1.5 - EPS <= m["shown"] <= 4.0 + EPS for m in tl["moments"]),
+       f"every moment is on screen 1.5–4 s ({sorted(m['shown'] for m in tl['moments'])})")
 expect(drop_seg["flashes"] == [0.0] and drop_seg["shakes"] == [0.0] and drop_seg["glitches"] == [0.0],
        "flash, shake and glitch on the drop")
 expect(drop_seg["speed"] < 0.8, f"slow-mo on the drop (average speed {drop_seg['speed']})")
@@ -145,24 +148,25 @@ expect(order == [m["id"] for m in ms if m["id"] in order], "moments play in Clau
 expect(len(set(order)) == len(order), "each moment plays as one run")
 expect(all(0 <= s["src_start"] and s["src_start"] + s["speed"] * s["dur"] <= DURS[s["source"]] for s in segs),
        "every shot stays inside its video")
-for m in ms:
+ok_window = True
+for m in tl["moments"]:
     run = [s for s in segs if s["moment"] == m["id"]]
-    if not run or m["drop"]:
+    if not run:
         continue
     lo = run[0]["src_start"]
     hi = run[-1]["src_start"] + edits.curve_src(run[-1]["curve"], run[-1]["dur"])
     ok_window = lo >= m["start"] - edits.EXTEND - EPS and hi <= m["end"] + edits.EXTEND + EPS
     if not ok_window:
         break
-expect(ok_window, "each moment's shots come from that moment (± a little picture)")
+expect(ok_window, "each moment's shots come from that moment, as cut (± a little picture)")
 slow_hits = 0
-for m in ms:
+for m in tl["moments"]:
     for s in segs:
         used = edits.curve_src(s["curve"], s["dur"])
         if s["moment"] == m["id"] and s["src_start"] - EPS <= m["hit"] <= s["src_start"] + used + EPS:
             t = edits.curve_time(s["curve"], s["dur"], m["hit"] - s["src_start"])
             slow_hits += edits.speed_at(s["curve"], t) <= 0.45
-expect(slow_hits >= len(ms) - 3, f"the hits play in slow motion ({slow_hits} of {len(ms)})")
+expect(slow_hits >= len(tl["moments"]) - 3, f"the hits play in slow motion ({slow_hits} of {len(tl['moments'])})")
 texts = [s for s in segs if s["text"]]
 expect(texts and all(s["at"] >= edits.HOOK_SECONDS - 0.05 or s["drop"] for s in texts),
        "punch words never cover the hook")
