@@ -7,6 +7,10 @@ hit on the drop, end on a bar line at the asked length, and that speech
 edits keep every sentence whole while still cutting on the beat. Also:
 moments off / reordered, plain errors, speed curves, and Claude's picks
 being checked (numbers he never said, duplicates, one drop).
+Moment lengths: every style × 15/20/30/60 s fed 12–28 s moments — each one cut
+to its style's window on word boundaries (whole thoughts in voice styles), the
+whole edit within ±15 % of the length asked; too-short moments left out with a
+note, no-words moments, key lines, sizes set by hand, campaign length limits.
 """
 from __future__ import annotations
 
@@ -106,8 +110,9 @@ expect(all(b[0] > a[0] for a, b in zip(c, c[1:])), "keyframes run forward")
 
 # --- Velocity --------------------------------------------------------------------------------
 print("== Velocity, 128 BPM, 20 s")
-ms = moments(10, span=3.0, drop=4)
+ms = moments(10, span=3.0, drop=2)
 tl = edits.build_timeline(ms, "velocity", 20, S128, {}, WORDS, durations=DURS, hook="He turned 500 into 2 million")
+FIT = {m["id"]: m for m in tl["moments"]}                         # how each moment was cut
 segs = tl["segments"]
 s0 = tl["music"]["start"]
 expect(contiguous(tl), "segments follow each other with no gaps, up to the exact length")
@@ -116,8 +121,8 @@ expect(abs(tl["drop_at"] + s0 - 20.99) < EPS, "the drop is where the song drops"
 expect(any(abs(s["at"] - tl["drop_at"]) < EPS for s in segs), "a cut lands exactly on the drop")
 drop_seg = next(s for s in segs if s["drop"])
 drop_m = next(m for m in ms if m["drop"])
-expect(drop_seg["moment"] == drop_m["id"] and abs(drop_seg["src_start"] - drop_m["hit"]) < EPS,
-       "the drop moment's hit is the frame on the drop")
+expect(drop_seg["moment"] == drop_m["id"] and abs(drop_seg["src_start"] - FIT[drop_m["id"]]["hit"]) < EPS
+       and abs(FIT[drop_m["id"]]["hit"] - drop_m["hit"]) < EPS, "the drop moment's hit is the frame on the drop")
 expect(abs(tl["drop_at"] - 8 * P128) < EPS, "the song starts 8 beats before the drop")
 bars = tl["length"] / (4 * P128)
 expect(abs(bars - round(bars)) < 1e-3 and abs(tl["length"] - 20) <= 2 * P128 + EPS,
@@ -126,6 +131,8 @@ expect(abs(tl["music"]["end"] - tl["music"]["start"] - tl["length"]) < EPS and t
        "the song section is exactly as long as the edit")
 expect(all(s["dur"] >= P128 - EPS for s in segs), "no shot is shorter than a beat")
 expect(segs[-1]["dur"] >= 2 * P128 - EPS, "the last shot gets at least two beats")
+expect(all(1.5 - EPS <= m["shown"] <= 4.0 + EPS for m in tl["moments"]),
+       f"every moment is on screen 1.5–4 s ({sorted(m['shown'] for m in tl['moments'])})")
 expect(drop_seg["flashes"] == [0.0] and drop_seg["shakes"] == [0.0] and drop_seg["glitches"] == [0.0],
        "flash, shake and glitch on the drop")
 expect(drop_seg["speed"] < 0.8, f"slow-mo on the drop (average speed {drop_seg['speed']})")
@@ -145,29 +152,42 @@ expect(order == [m["id"] for m in ms if m["id"] in order], "moments play in Clau
 expect(len(set(order)) == len(order), "each moment plays as one run")
 expect(all(0 <= s["src_start"] and s["src_start"] + s["speed"] * s["dur"] <= DURS[s["source"]] for s in segs),
        "every shot stays inside its video")
-for m in ms:
+ok_window = True
+for m in tl["moments"]:
     run = [s for s in segs if s["moment"] == m["id"]]
-    if not run or m["drop"]:
+    if not run:
         continue
     lo = run[0]["src_start"]
     hi = run[-1]["src_start"] + edits.curve_src(run[-1]["curve"], run[-1]["dur"])
     ok_window = lo >= m["start"] - edits.EXTEND - EPS and hi <= m["end"] + edits.EXTEND + EPS
     if not ok_window:
         break
-expect(ok_window, "each moment's shots come from that moment (± a little picture)")
+expect(ok_window, "each moment's shots come from that moment, as cut (± a little picture)")
 slow_hits = 0
-for m in ms:
+for m in tl["moments"]:
     for s in segs:
         used = edits.curve_src(s["curve"], s["dur"])
         if s["moment"] == m["id"] and s["src_start"] - EPS <= m["hit"] <= s["src_start"] + used + EPS:
             t = edits.curve_time(s["curve"], s["dur"], m["hit"] - s["src_start"])
             slow_hits += edits.speed_at(s["curve"], t) <= 0.45
-expect(slow_hits >= len(ms) - 3, f"the hits play in slow motion ({slow_hits} of {len(ms)})")
+expect(slow_hits >= len(tl["moments"]) - 3, f"the hits play in slow motion ({slow_hits} of {len(tl['moments'])})")
 texts = [s for s in segs if s["text"]]
 expect(texts and all(s["at"] >= edits.HOOK_SECONDS - 0.05 or s["drop"] for s in texts),
        "punch words never cover the hook")
 expect(tl["hook"]["text"] and tl["hook"]["end"] == edits.HOOK_SECONDS, "the hook is on screen for the first 2.8 s")
 expect(tl["loop"] == edits.LOOP_SECONDS, "the ending loops")
+
+print("== four moments before the drop: the song starts earlier so they keep their order")
+t4b = edits.build_timeline(moments(10, span=3.0, drop=4), "velocity", 20, S128, {}, WORDS, durations=DURS)
+order4 = []
+for s in t4b["segments"]:
+    if not order4 or order4[-1] != s["moment"]:
+        order4.append(s["moment"])
+expect(order4 == [f"m{i}" for i in range(1, 11) if f"m{i}" in order4] and order4[4] == "m5",
+       f"Claude's order kept, the drop fifth ({order4})")
+expect(abs(t4b["drop_at"] - 16 * P128) < EPS and abs(t4b["length"] - 20) <= 3,
+       f"the build is 16 beats, the edit still {t4b['length']:.1f} s")
+expect(all(1.5 - EPS <= m["shown"] <= 4.0 + EPS for m in t4b["moments"]), "…every moment still 1.5–4 s")
 
 print("== Velocity, other tempos")
 for bpm, drop in ((92, 26.457), (150, 12.4), (174, 30.0)):
@@ -180,7 +200,7 @@ for bpm, drop in ((92, 26.457), (150, 12.4), (174, 30.0)):
     expect(ok, f"{bpm} BPM: on the beat, the drop on the drop, {len(t2['segments'])} shots in {t2['length']:.1f} s")
 
 print("== Aura, Flow, Money")
-ta = edits.build_timeline(moments(5, span=4.0, drop=2), "aura", 15, S128, {}, WORDS, durations=DURS)
+ta = edits.build_timeline(moments(5, span=4.0, drop=1), "aura", 15, S128, {}, WORDS, durations=DURS)
 expect(abs(ta["drop_at"] - 4 * P128) < EPS, "Aura: one bar before the drop")
 expect(all(abs(s["dur"] - 8 * P128) < EPS for s in ta["segments"][1:-1]), "Aura: a cut every two bars")
 expect(all(abs(s["speed"] - 0.6) < 0.01 for s in ta["segments"] if not s["drop"]), "Aura: slow-mo holds")
@@ -218,8 +238,14 @@ expect(contiguous(tc), "segments follow each other with no gaps")
 expect(all(near_beat(s["at"] + song0, BEATS128) < EPS for s in segs), "every cut lands on a beat")
 whole = all(abs(s["src_start"] + s["voice"][0] - m["start"]) < EPS and
             abs(s["voice"][1] - s["voice"][0] - (m["end"] - m["start"])) < EPS and s["voice"][1] <= s["dur"] + EPS
-            for s, m in zip(segs, sp))
-expect(whole, "every moment plays whole, every word of it")
+            for s, m in zip(segs, tc["moments"]))
+expect(whole and [m["id"] for m in tc["moments"]] == ["c1", "c2", "c3"],
+       "every moment plays whole as cut, every word of it")
+sent = edits.word_source(WORDS["A"])
+edges_ok = all(sent["sq"][next(k for k, w in enumerate(sent["ws"]) if w["start"] >= m["start"])] == 0
+               and sent["eq"][max(k for k, w in enumerate(sent["ws"]) if w["end"] <= m["end"])] == 0
+               for m in tc["moments"] if m["id"] != "c2")
+expect(edges_ok, "each starts on a sentence start and ends on a sentence end")
 ds = next(s for s in segs if s["drop"])
 expect(abs(ds["at"] + ds["hit"] + song0 - 20.99) < EPS, "the drop moment's hit meets the song's drop")
 expect(all(s["dur"] - s["voice"][1] < P128 + 1.3 for s in segs), "the picture holds less than a beat (a bar at the end)")
@@ -233,7 +259,9 @@ expect(all(s["dip_in"] == (i > 0) for i, s in enumerate(segs)), "dips between th
 print("== Motivation with no music")
 tn = edits.build_timeline(sp, "motivation", 30, None, {}, WORDS, durations=DURS)
 expect(tn["music"] is None and contiguous(tn), "no song: the lines play back to back")
-expect(abs(tn["length"] - sum(m["end"] - m["start"] for m in sp) - 0.35) < EPS, "length = the lines + a short hold")
+expect(abs(tn["length"] - sum(m["end"] - m["start"] for m in tn["moments"]) - 0.35) < EPS,
+       "length = the lines as cut + a short hold")
+expect(abs(tn["length"] - 30) <= 0.15 * 30, f"…and within ±15 % of 30 s ({tn['length']:.1f} s)")
 expect(next(s for s in tn["segments"] if s["drop"])["flashes"], "a flash on the strongest line")
 
 print("== Funny: a punch and a shake on every punchline")
@@ -241,12 +269,21 @@ tfun = edits.build_timeline(sp, "funny", 30, None, {}, WORDS, durations=DURS)
 expect(all(s["pulses"] == [s["hit"]] and s["shakes"] == [s["hit"]] for s in tfun["segments"]),
        "zoom punch + shake at each punchline")
 
-print("== a speech edit too long for the asked length leaves moments out, never the drop")
+print("== a speech edit too long for the asked length: moments shortened first, then the weakest left out")
 long_sp = [dict(m, end=m["start"] + 12) for m in sp] + [
     {"id": "c4", "source": "B", "start": 200.0, "end": 212.0, "hit": 205.0, "text": "four", "drop": False}]
 tl4 = edits.build_timeline(long_sp, "cinematic", 25, S128, {}, WORDS, durations=DURS)
 ids = [s["moment"] for s in tl4["segments"]]
-expect("c2" in ids and len(ids) < 4 and tl4["notes"], f"kept {ids}, with a note why")
+expect(ids == ["c1", "c2", "c3", "c4"] and abs(tl4["length"] - 25) <= 0.15 * 25,
+       f"all four kept, shortened: {tl4['length']:.1f} s for 25 s asked")
+many_sp = [{"id": f"x{k}", "source": "AB"[k % 2], "start": 30.0 + 40 * k, "end": 42.0 + 40 * k, "hit": 36.0 + 40 * k,
+            "text": "", "drop": k == 2, "strength": 9 if k == 1 else 3} for k in range(7)]
+tl5 = edits.build_timeline(many_sp, "cinematic", 20, S128, {}, WORDS, durations=DURS)
+kept5 = [m["id"] for m in tl5["moments"]]
+expect("x2" in kept5 and "x1" in kept5 and len(kept5) < 7 and abs(tl5["length"] - 20) <= 3.0 + EPS,
+       f"seven 12 s moments in a 20 s edit: kept {kept5} ({tl5['length']:.1f} s), the drop and the strongest stay")
+expect(len(tl5["left_out"]) == 7 - len(kept5) and sum("Left out" in n for n in tl5["notes"]) == len(tl5["left_out"]),
+       "each one left out says why")
 
 # --- picking the part of the song ------------------------------------------------------------
 print("== picking the part of the song")
@@ -274,13 +311,17 @@ ms = moments(8, drop=3)
 ms[1]["off"] = True
 t5 = edits.build_timeline(ms, "velocity", 20, S128, {}, WORDS, durations=DURS)
 expect("m2" not in {s["moment"] for s in t5["segments"]}, "a switched-off moment is gone")
-re = [ms[5], ms[0], ms[2], ms[3], ms[4]]
+fresh = moments(8, drop=3)
+re = [fresh[5], fresh[0], fresh[2], fresh[3], fresh[4], fresh[1], fresh[6], fresh[7]]
 t6 = edits.build_timeline(re, "velocity", 20, S128, {}, WORDS, durations=DURS)
 seen = []
 for s in t6["segments"]:
     if s["moment"] not in seen:
         seen.append(s["moment"])
-expect(seen == ["m6", "m1", "m3", "m4", "m5"], "a new order plays in the new order")
+expect(seen == ["m6", "m1", "m3", "m4", "m5", "m2", "m7", "m8"], f"a new order plays in the new order ({seen})")
+few = edits.build_timeline(re[:5], "velocity", 20, S128, {}, WORDS, durations=DURS)
+expect(abs(few["length"] - 20) <= 0.15 * 20 + EPS and few["notes"],
+       f"only five moments for 20 s: still {few['length']:.1f} s, and it says what it did")
 moved = [dict(m, drop=(m["id"] == "m6")) for m in moments(8, drop=3)]
 t7 = edits.build_timeline(moved, "velocity", 20, S128, {}, WORDS, durations=DURS)
 expect(next(s for s in t7["segments"] if s["drop"])["moment"] == "m6", "the moment you put on the drop lands there")
@@ -314,6 +355,219 @@ t10 = edits.build_timeline(moments(6, drop=2), "velocity", 20, early, {}, WORDS,
 expect(t10["music"]["start"] >= 0 and abs(t10["drop_at"] + t10["music"]["start"] - early["analysis"]["drop"]) < EPS,
        "a drop in the first seconds of the song still lands")
 expect(edits.style_key("hype") == "velocity" and edits.style_key("luxury") == "money", "the old style names still work")
+
+# --- moment lengths: every style's window, word boundaries, the length budget -----------------
+import bisect  # noqa: E402
+import random  # noqa: E402
+
+VOCAB = ("so I told him we are going to win this thing and he laughed at me but look at us now bro the market "
+         "opened red and I stayed calm because the plan said wait").split()
+
+
+def talk(seconds, seed):
+    """Made-up speech: sentences of 4-14 words, capitalised, ending in . ! or ?, a few commas, pauses between."""
+    rng = random.Random(seed)
+    words, t = [], 1.0
+    while t < seconds - 3:
+        n = rng.randint(4, 14)
+        for i in range(n):
+            w = rng.choice(VOCAB)
+            w = w.capitalize() if i == 0 else w
+            w += rng.choice([".", "!", "?"]) if i == n - 1 else ("," if rng.random() < 0.12 else "")
+            d = rng.uniform(0.18, 0.4)
+            words.append({"w": w, "start": round(t, 3), "end": round(t + d, 3)})
+            t += d + rng.uniform(0.02, 0.12)
+        t += rng.uniform(0.3, 0.9)
+    return words
+
+
+TALK = {"A": talk(1200, 1), "B": talk(1200, 2)}
+TDUR = {"A": 1200.0, "B": 1200.0}
+SRC = {k: edits.word_source(v) for k, v in TALK.items()}
+
+
+def long_moments(n, seed=0):
+    rng = random.Random(seed)
+    out = []
+    for i in range(n):
+        span = rng.uniform(12, 28)
+        s = 20 + i * 28.0
+        out.append({"id": f"m{i + 1}", "source": "AB"[i % 2], "start": round(s, 2), "end": round(s + span, 2),
+                    "hit": round(s + span * rng.uniform(0.3, 0.9), 2), "text": "", "drop": i == n // 3,
+                    "strength": rng.randint(3, 9)})
+    return out
+
+
+def inside_word(src, t):
+    """True when second t falls inside a word (a cut there would chop it)."""
+    k = bisect.bisect_right(src["starts"], t) - 1
+    return k >= 0 and src["ws"][k]["start"] + 0.03 < t < src["ws"][k]["end"] - 0.03
+
+
+def first_word(src, t):
+    return bisect.bisect_left(src["starts"], t - 0.001)
+
+
+def last_word(src, t):
+    return max(k for k in range(max(0, bisect.bisect_right(src["starts"], t) - 60), len(src["ws"]))
+               if src["ws"][k]["end"] <= t + 0.001)
+
+
+print("== every style × 15/20/30/60 s with long moments (12–28 s each)")
+S96 = song(96, 30.0, duration=120.0)
+S128L = song(128, 30.0, duration=120.0)
+for style, st in edits.STYLES.items():
+    lo_w, hi_w = st["window"]
+    for L in (15, 20, 30, 60):
+        for snd in ((S128L, S96) if st["pace"] == "beat" else (S128L, None)):
+            ms = long_moments(edits.count_for(style, L)[1], seed=L)
+            t = edits.build_timeline(ms, style, L, snd, {}, TALK, durations=TDUR, hook="Hook")
+            tag = f"{style} {L} s {'%d BPM' % snd['analysis']['bpm'] if snd else 'no music'}"
+            within = abs(t["length"] - L) <= 0.15 * L + EPS
+            if st["pace"] == "speech":
+                lens = [m["end"] - m["start"] for m in t["moments"]]
+            else:
+                lens = [m["shown"] for m in t["moments"]]
+            in_win = all(lo_w - 0.06 <= x <= hi_w + 0.06 for x in lens)
+            edges = all(not inside_word(SRC[m["source"]], m["start"]) and not inside_word(SRC[m["source"]], m["end"])
+                        for m in t["moments"])
+            whole = True
+            if st["pace"] == "speech":
+                for m in t["moments"]:
+                    src = SRC[m["source"]]
+                    i, j = first_word(src, m["start"]), last_word(src, m["end"])
+                    whole = whole and src["sq"][i] <= 1 and src["eq"][j] <= 1
+                segs_ok = all(abs(s["voice"][1] - s["voice"][0] - (m["end"] - m["start"])) < EPS
+                              for s, m in zip(t["segments"], t["moments"]))
+                whole = whole and segs_ok
+            hits = all(m["start"] - EPS <= m["hit"] <= m["end"] + EPS for m in t["moments"])
+            told = len(t["left_out"]) == len(ms) - len(t["moments"]) and \
+                sum("Left out" in n for n in t["notes"]) >= len(t["left_out"])
+            expect(within and in_win and edges and whole and hits and told,
+                   f"{tag}: {t['length']:.1f} s, {len(t['moments'])}/{len(ms)} moments of "
+                   f"{min(lens):.1f}–{max(lens):.1f} s (window {lo_w:g}–{hi_w:g}), clean edges"
+                   + ("" if within else " [LENGTH]") + ("" if in_win else " [WINDOW]") + ("" if edges else " [EDGE]")
+                   + ("" if whole else " [THOUGHT]") + ("" if hits else " [HIT]") + ("" if told else " [NOTE]"))
+
+print("== pace faster / slower keeps the windows")
+for style in ("velocity", "flow", "money", "aura"):
+    lo_w, hi_w = edits.STYLES[style]["window"]
+    for pace in ("faster", "slower"):
+        t = edits.build_timeline(long_moments(edits.count_for(style, 30)[1], 3), style, 30, S128L, {}, TALK,
+                                 durations=TDUR, pace=pace)
+        expect(all(lo_w - 0.06 <= m["shown"] <= hi_w + 0.06 for m in t["moments"]) and abs(t["length"] - 30) <= 4.5,
+               f"{style} {pace}: {t['length']:.1f} s, moments {min(m['shown'] for m in t['moments']):.1f}–"
+               f"{max(m['shown'] for m in t['moments']):.1f} s")
+
+print("== a moment too short to cut cleanly is left out, with a note")
+tiny_words = [{"w": w, "start": 0.2 + i * 0.3, "end": 0.45 + i * 0.3} for i, w in enumerate("No way bro that's crazy.".split())]
+tiny = [{"id": "t1", "source": "T", "start": 0.3, "end": 1.4, "hit": 1.0, "text": "", "drop": False},
+        {"id": "t2", "source": "A", "start": 100.0, "end": 104.0, "hit": 102.0, "text": "", "drop": True}]
+tt = edits.build_timeline(tiny, "funny", 15, None, {}, {"T": tiny_words, "A": TALK["A"]},
+                          durations={"T": 2.0, "A": 1200.0})
+expect([x["id"] for x in tt["left_out"]] == ["t1"] and any("Left out" in n and "3 s" in n for n in tt["notes"]),
+       f"a 1.1 s quip in a 2 s video can't make Funny's 3 s: “{next((n for n in tt['notes'] if 'Left out' in n), '')}”")
+expect(abs(tt["length"] - 15) > 0.15 * 15 and any("less than the 15 s" in n for n in tt["notes"]),
+       "one moment can't fill 15 s — and it says so instead of pretending")
+try:
+    edits.build_timeline(tiny[:1], "funny", 15, None, {}, {"T": tiny_words}, durations={"T": 2.0})
+    expect(False, "nothing left to play is refused")
+except ValueError as exc:
+    expect("cut cleanly" in str(exc), f"nothing left: “{exc}”")
+
+print("== no words: kept, cut around the hit to the window")
+nw = [{"id": f"n{i}", "source": "S", "start": 5.0 + 20 * i, "end": 25.0 + 20 * i, "hit": 12.0 + 20 * i, "text": "",
+       "drop": i == 1} for i in range(6)]
+tnw = edits.build_timeline(nw, "funny", 30, None, {}, {}, durations={"S": 200.0})
+expect(all(3.0 - EPS <= m["end"] - m["start"] <= 8.0 + EPS and m["start"] <= m["hit"] <= m["end"]
+           for m in tnw["moments"]) and abs(tnw["length"] - 30) <= 4.5,
+       f"Funny with no transcript: {len(tnw['moments'])} moments of 3–8 s, {tnw['length']:.1f} s")
+tnb = edits.build_timeline(nw, "velocity", 15, S128L, {}, {}, durations={"S": 200.0})
+expect(all(1.5 - EPS <= m["shown"] <= 4.0 + EPS for m in tnb["moments"]), "Velocity with no transcript: 1.5–4 s each")
+
+print("== the key line stays, and a line longer than the window ends on its punchline")
+kl = [{"w": w, "start": 50.0 + i * 0.4, "end": 50.3 + i * 0.4} for i, w in enumerate(
+      "Listen. Most people quit too early, they never see it work. Discipline is the whole game. "
+      "Then we went to get food and talked about cars for an hour.".split())]
+line_m = [{"id": "k1", "source": "K", "start": 49.0, "end": 72.0, "hit": 60.0, "text": "Discipline is the whole game",
+           "key": "game", "drop": True}]
+tk = edits.build_timeline(line_m, "motivation", 15, None, {}, {"K": kl}, durations={"K": 120.0})
+k = tk["moments"][0]
+said = [w["w"] for w in kl if k["start"] - 0.01 <= w["start"] and w["end"] <= k["end"] + 0.01]
+expect("Discipline" in said and "game." in said and "cars" not in said and 4.0 - EPS <= k["end"] - k["start"] <= 10 + EPS,
+       f"Motivation keeps “Discipline is the whole game.” and stops there: {' '.join(said)}")
+long_line = [{"w": w, "start": 10.0 + i * 0.45, "end": 10.35 + i * 0.45} for i, w in enumerate(
+    ("Every single morning I wake up, I check the plan, I check my risk, I sit on my hands, I wait for the "
+     "setup, and when it finally comes I take it without fear.").split())]
+ll = [{"id": "l1", "source": "L", "start": 9.5, "end": 24.0, "hit": 23.5, "text": "", "key": "fear", "drop": True}]
+tll = edits.build_timeline(ll, "motivation", 15, None, {}, {"L": long_line}, durations={"L": 40.0})
+c = tll["moments"][0]
+lsrc = edits.word_source(long_line)
+fi = first_word(lsrc, c["start"])
+expect(c["end"] - c["start"] <= 10 + EPS and [w["w"] for w in long_line if w["end"] <= c["end"] + 0.01][-1] == "fear."
+       and lsrc["sq"][fi] <= 1, f"a 14 s sentence: the last {c['end'] - c['start']:.1f} s, from a comma to "
+                                f"“fear.” (starts on “{long_line[fi]['w']}”)")
+
+print("== sizes set by hand win over the window; the edit still keeps its length")
+base = long_moments(6, 11)
+cut = edits.build_timeline(base, "funny", 30, None, {}, TALK, durations=TDUR)
+first = next(m for m in cut["moments"] if m["id"] == "m2")
+m2 = dict(base[1], start=first["start"], end=first["end"], hit=first["hit"], pick=first["pick"])
+longer, note = edits.resize_moment(m2, {"seconds": 11}, "funny", TALK["B"], 1200.0)
+expect(longer and longer["manual"] and 10.0 <= longer["end"] - longer["start"] <= 12.6 and
+       longer["start"] <= m2["start"] + EPS and longer["end"] >= m2["end"] - EPS and "because you asked" in note,
+       f"“make it 11 seconds”: {note}")
+expect(not inside_word(SRC["B"], longer["start"]) and not inside_word(SRC["B"], longer["end"]), "…on word boundaries")
+withm = [longer if m["id"] == "m2" else m for m in base]
+tw = edits.build_timeline(withm, "funny", 30, None, {}, TALK, durations=TDUR)
+mm = next(m for m in tw["moments"] if m["id"] == "m2")
+expect(abs((mm["end"] - mm["start"]) - (longer["end"] - longer["start"])) < 0.02 and abs(tw["length"] - 30) <= 4.5
+       and any("because you asked" in n for n in tw["notes"]),
+       f"the 11 s moment plays as set, the edit is still {tw['length']:.1f} s, and it says why")
+shorter, note = edits.resize_moment(m2, {"size": "shorter"}, "funny", TALK["B"], 1200.0)
+expect(shorter and shorter["end"] - shorter["start"] < first["end"] - first["start"] - 0.5 and
+       shorter["start"] - EPS <= shorter["hit"] <= shorter["end"] + EPS and
+       m2["start"] - EPS <= shorter["start"] and shorter["end"] <= m2["end"] + EPS,
+       f"“shorter”: {note}")
+trimmed, note = edits.resize_moment(m2, {"trim_start": 2}, "funny", TALK["B"], 1200.0)
+expect(trimmed and 1.0 <= trimmed["start"] - m2["start"] <= 3.2 and abs(trimmed["end"] - m2["end"]) < EPS
+       and not inside_word(SRC["B"], trimmed["start"]), f"“cut the first 2 seconds”: {note}")
+lets = [{"w": w, "start": 5.0 + i * 0.4, "end": 5.3 + i * 0.4} for i, w in enumerate(
+    "Alright we are live. Let's go! Today we trade the open and we keep it simple.".split())]
+lm = {"id": "g1", "source": "G", "start": 4.9, "end": 11.0, "hit": 6.0, "text": "", "drop": True}
+ended, note = edits.resize_moment(lm, {"end_words": "let's go"}, "funny", lets, 60.0)
+expect(ended and lets[5]["end"] - 0.01 <= ended["end"] < lets[6]["start"] and ended["hit"] <= ended["end"],
+       f"“end right after he says let's go” (before “Today”): {note}")
+nope, why = edits.resize_moment(lm, {"end_words": "to the moon"}, "funny", lets, 60.0)
+expect(nope is None and "Couldn't find" in why, f"words he never says there: “{why}”")
+nope, why = edits.resize_moment(lm, {"trim_start": 30}, "funny", lets, 60.0)
+expect(nope is None and why, f"cutting more than the moment: “{why}”")
+
+print("== a campaign's own length limits")
+camp = edits.build_timeline(long_moments(7, 5), "funny", 30, None, {}, TALK, durations=TDUR,
+                            limits={"max": 20, "name": "TJR — Reach"})
+expect(camp["length"] <= 20 + EPS and any("TJR — Reach allows at most 20 s" in n for n in camp["notes"]),
+       f"asked 30 s, the brief allows 20 s: {camp['length']:.1f} s, and it says why")
+campb = edits.build_timeline(long_moments(12, 5), "velocity", 30, S128L, {}, TALK, durations=TDUR,
+                             limits={"max": 20, "name": "TJR — Reach"})
+expect(campb["length"] <= 20 + EPS, f"…a beat edit too ({campb['length']:.1f} s)")
+tiny_camp = edits.build_timeline(long_moments(7, 5), "funny", 30, None, {}, TALK, durations=TDUR,
+                                 limits={"max": 5, "name": "Short brand"})
+expect(any("block" in n for n in tiny_camp["notes"]), "a brief allowing only 5 s: it says the check will block it")
+mincamp = edits.build_timeline(long_moments(7, 5), "funny", 15, None, {}, TALK, durations=TDUR,
+                               limits={"min": 25, "name": "Long brand"})
+expect(mincamp["length"] >= 25 - EPS, f"a brief asking for at least 25 s: {mincamp['length']:.1f} s")
+
+print("== a song that drops in its first second")
+early_s = song(128, 0.9, duration=60.0)
+te = edits.build_timeline(long_moments(9, 2), "velocity", 20, early_s, {}, TALK, durations=TDUR)
+expect(all(1.5 - EPS <= m["shown"] <= 4.0 + EPS for m in te["moments"]) and abs(te["length"] - 20) <= 3 and
+       abs(te["drop_at"] + te["music"]["start"] - early_s["analysis"]["drop"]) < EPS,
+       f"the windows hold and the drop still lands ({te['length']:.1f} s)")
+
+print("== moment counts and what Claude is told")
+expect(edits.count_for("funny", 30) == (4, 7) and edits.count_for("motivation", 60)[0] >= 6 and
+       edits.count_for("velocity", 60)[0] >= 15, f"counts scale with the length {edits.count_for('motivation', 60)}")
 
 # --- Claude's picks are checked -------------------------------------------------------------
 print("== Claude's picks are checked")

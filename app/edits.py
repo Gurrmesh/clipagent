@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -70,66 +71,72 @@ def _fx(on: str) -> Dict[str, bool]:
     return {k: k in names for k in EFFECTS}
 
 
+# `window` is how long ONE moment plays in that style (seconds, shortest–longest) — enforced in code
+# (fit_moments), not only asked of Claude. `ideal` is the length a moment is cut to when nothing else
+# decides it. Funny, Velocity and Motivation are gs's own numbers; the others follow each style's cut
+# pattern (see _base_patterns): the window's shortest is the style's shortest normal shot, its longest
+# what a shot may hold before the edit stalls.
 STYLES: Dict[str, Dict[str, Any]] = {
     "velocity": {
         "name": "Velocity", "pace": "beat", "voice": 0.0, "music": 1.0, "grade": "punchy", "text": "punch",
-        "length": 20, "needs_music": True, "pre_beats": 8, "count": (8, 12),
+        "length": 20, "needs_music": True, "pre_beats": 8, "count": (8, 12), "window": (1.5, 4.0), "ideal": 2.5,
         "what": "Cut on every beat: speed ramps, slow-mo and a glitch on the drop, flashes and zoom punches.",
         "effects": _fx("ramp slowmo flash pulse shake glitch vignette text loop"),
-        "brief": "8 to 12 short moments, 1.5 to 4 seconds each, with the most energy: a big claim, a number, a hard "
+        "brief": "Short moments, {w} each, with the most energy: a big claim, a number, a hard "
                  "line, a laugh, a reaction. `text`: 1 to 4 punch words he actually says in that moment (\"SEVEN "
                  "YEARS\", \"STICK TO IT\"), no emoji. Mark the single hardest moment as the drop.",
     },
     "aura": {
         "name": "Aura", "pace": "beat", "voice": 0.0, "music": 1.0, "grade": "teal", "text": "hook",
-        "length": 15, "needs_music": True, "pre_beats": 4, "count": (4, 7),
+        "length": 15, "needs_music": True, "pre_beats": 4, "count": (4, 7), "window": (1.5, 5.0), "ideal": 3.5,
         "what": "Slow and cold: long slow-mo shots, one cut every two bars, a lore hook on top.",
         "effects": _fx("slowmo flash push grain vignette text loop"),
-        "brief": "4 to 7 moments, 2 to 5 seconds each, where he looks most in control: a calm flex, a knowing look "
+        "brief": "Moments of {w} where he looks most in control: a calm flex, a knowing look "
                  "after a big line, a win. The words don't play (music only), so pick moments that look strong. "
                  "Mark the strongest as the drop. `text` can be empty: the hook carries the edit.",
     },
     "flow": {
         "name": "Flow", "pace": "beat", "voice": 0.0, "music": 1.0, "grade": "tealorange", "text": "hook",
-        "length": 25, "needs_music": True, "pre_beats": 8, "count": (15, 30),
+        "length": 25, "needs_music": True, "pre_beats": 8, "count": (15, 30), "window": (0.75, 3.0), "ideal": 3.0,
         "what": "Smooth match cuts about once a second: every cut carries the movement into the next shot.",
         "effects": _fx("ramp slowmo flash pulse shake blur vignette text loop"),
-        "brief": "15 to 30 short moments, 1 to 3 seconds each, where he MOVES: gestures, turns, leans in, laughs, "
+        "brief": "Short moments, {w} each, where he MOVES: gestures, turns, leans in, laughs, "
                  "stands up, points, reacts. Movement matters more than words here (the words don't play). Mark the "
                  "most energetic as the drop. `text` can be empty.",
     },
     "cinematic": {
         "name": "Cinematic", "pace": "speech", "voice": 1.0, "music": 0.30, "grade": "film", "text": "subtitle",
-        "length": 30, "music_optional": True, "dip": True, "count": (3, 5),
+        "length": 30, "music_optional": True, "dip": True, "count": (3, 5), "window": (4.0, 12.0), "ideal": 8.0,
         "what": "Film look with cinema bars and grain; his words with the music underneath.",
         "effects": _fx("push grain vignette letterbox text loop"),
-        "brief": "3 to 5 moments, 5 to 12 seconds each, that each say something complete and quotable — a lesson, "
+        "brief": "Moments of {w} that each say something complete and quotable — a lesson, "
                  "a turning point, a truth. They should flow as one short story. `text`: the line itself.",
     },
     "motivation": {
         "name": "Motivation", "pace": "speech", "voice": 1.0, "music": 0.36, "grade": "mono", "text": "build",
-        "length": 20, "music_optional": True, "dip": True, "count": (2, 4),
+        "length": 20, "music_optional": True, "dip": True, "count": (2, 4), "window": (4.0, 10.0), "ideal": 7.0,
         "what": "Black and white, his strongest lines building up word by word, music swelling behind.",
         "effects": _fx("flash push grain vignette text loop"),
-        "brief": "2 to 4 moments, 4 to 10 seconds each: his most powerful lines about discipline, mindset, money or "
+        "brief": "Moments of {w}: his most powerful lines about discipline, mindset, money or "
                  "winning — each a complete thought on sentence edges. `text`: the line itself; `key`: the one word "
                  "that hits hardest. Mark the strongest as the drop.",
     },
     "funny": {
         "name": "Funny", "pace": "speech", "voice": 1.0, "music": 0.12, "grade": "none", "text": "meme",
-        "length": 30, "music_optional": True, "count": (4, 7),
+        "length": 30, "music_optional": True, "count": (4, 7), "window": (3.0, 8.0), "ideal": 5.5,
         "what": "The funniest bits back to back: hard cuts, a zoom punch and shake on every punchline, meme text.",
         "effects": _fx("pulse shake text loop"),
-        "brief": "4 to 7 moments, 3 to 9 seconds each: the funniest bits — jokes, reactions, chaos, awkward moments. "
+        "brief": "Moments of {w}: the funniest bits — jokes, reactions, chaos, awkward moments. "
                  "Each must land its punchline inside it; `hit` is the punchline. `text`: a short meme caption in a "
                  "viewer's voice (max 8 words), or empty.",
     },
     "money": {
         "name": "Money", "pace": "beat", "voice": 0.0, "music": 1.0, "grade": "gold", "text": "quote",
-        "length": 20, "needs_music": True, "pre_beats": 4, "dip": True, "count": (6, 9),
+        "length": 20, "needs_music": True, "pre_beats": 4, "dip": True, "count": (6, 9), "window": (1.5, 5.0),
+        "ideal": 3.0,
         "what": "Warm gold grade, smooth slow-mo and push-ins, a cut every four beats, the money lines on screen.",
         "effects": _fx("slowmo push grain vignette text loop"),
-        "brief": "6 to 9 moments, 2 to 5 seconds each, about money, wins, the lifestyle and big numbers. `text`: a "
+        "brief": "Moments of {w} about money, wins, the lifestyle and big numbers. `text`: a "
                  "short money line he actually says there (max 6 words).",
     },
 }
@@ -137,14 +144,33 @@ ALIASES = {"hype": "velocity", "luxury": "money"}      # names used by the first
 LENGTHS = (15, 20, 25, 30, 40, 60)
 
 
-def _a(name: str) -> str:
-    return ("An " if name[:1].lower() in "aeiou" else "A ") + name
+def _a(name: str, low: bool = False) -> str:
+    art = "An " if name[:1].lower() in "aeiou" else "A "
+    return (art.lower() if low else art) + name
 
 
 def style_key(name: Any) -> str:
     key = str(name or "").strip().lower()
     key = ALIASES.get(key, key)
     return key if key in STYLES else "velocity"
+
+
+def window_text(style: str) -> str:
+    """A style's moment length in plain words: "3–8 s"."""
+    lo, hi = STYLES[style_key(style)]["window"]
+    return f"{lo:g}–{hi:g} s"
+
+
+def count_for(style: str, length: float) -> Tuple[int, int]:
+    """How many moments to ask Claude for: the style's usual count scaled to the length, and never fewer
+    than it takes to fill the length at the style's longest moment."""
+    st = STYLES[style_key(style)]
+    lo_w, hi_w = st["window"]
+    c_lo, c_hi = st["count"]
+    k = float(length or st["length"]) / st["length"]
+    lo_n = max(1, int(round(c_lo * k)), int(math.ceil(0.9 * float(length or st["length"]) / hi_w)))
+    hi_n = max(lo_n + 1, int(round(c_hi * k)))
+    return lo_n, min(40, hi_n)
 
 
 # --- sounds ----------------------------------------------------------------------------
@@ -359,6 +385,399 @@ def _said_between(words: List[Dict[str, Any]], start: float, end: float) -> str:
     return " ".join(w.get("w", "") for w in words if start <= w["start"] <= end)
 
 
+# --- cutting moments to length, on word boundaries ------------------------------------------
+# Every style has a window (STYLES[...]["window"]): how long one moment plays. Claude is asked for
+# it, and here it is enforced: a moment is cut down to its punchline — its strongest stretch —
+# starting on a sentence start (or a breath) and ending right after the punchline on a sentence
+# end (or a breath), never inside a word. A little silence around the words may pad a short moment
+# (a look, a reaction). A moment that can't be cut cleanly to at least the window's shortest is
+# left out, with a note. A moment gs sized himself keeps his size.
+# Then the length budget: a voice edit's moments are shortened (still within their windows), then
+# the weakest left out, until the edit is within ±15 % of the length asked (a beat edit gets that
+# from the song's bars). Everything here is pure: words in, numbers out.
+
+CLAUSE_END = re.compile(r"[,;:—–][\"'”’)\]]*$")
+BREATH = 0.25                    # a gap this long inside a sentence is a clean place to cut
+LEAD, TAIL = 0.1, 0.22           # air kept before the first word and after the last
+PAD_BEFORE, PAD_AFTER = 1.0, 1.5  # picture without words a moment may take before / after its words
+REACH_BEFORE, REACH_AFTER = 3.0, 2.0  # how far outside Claude's pick a cut may reach (setup / reaction)
+AFTER_PUNCH = 2.5                # at most this much talking after the punchline (silence may follow)
+UNIT = 0.1                       # the length budget works in tenths of a second
+BUDGET = 0.15                    # a finished edit stays within ±15 % of the length asked
+MIN_MOMENT = 0.8                 # nothing plays shorter than this, even when asked for by hand
+NEVER = 1e12
+
+
+def _edge_costs(style: str) -> Tuple[float, float, float]:
+    """What a cut costs at a sentence edge, at a breath or comma, and just between two words.
+    His words play in voice styles, so a half thought is expensive there; Flow follows motion."""
+    if STYLES[style]["pace"] == "speech":
+        return 0.0, 1.2, 4.0
+    if style == "flow":
+        return 0.0, 0.0, 0.0
+    return 0.0, 0.3, 0.6
+
+
+def _clean_words(words: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Words in order, none overlapping the next (a cut between two words is then always clean)."""
+    out: List[Dict[str, Any]] = []
+    for w in words or []:
+        text = str(w.get("w") or "").strip()
+        if not text:
+            continue
+        try:
+            s, e = float(w["start"]), float(w["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if out:
+            s = max(s, out[-1]["start"] + 0.01)
+            if out[-1]["end"] > s:
+                out[-1]["end"] = s
+        out.append({"w": text, "start": s, "end": max(e, s + 0.01)})
+    return out
+
+
+def word_source(words: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """A video's words with, for each, how cleanly a moment can start on it (sq) or end after it (eq):
+    0 = a sentence edge or a real pause, 1 = a comma or a breath, 2 = just between two words."""
+    ws = _clean_words(words)
+    n = len(ws)
+    sq, eq = [2] * n, [2] * n
+    for k in range(n):
+        gap = ws[k]["start"] - ws[k - 1]["end"] if k else 1e9
+        prev = ws[k - 1]["w"] if k else ""
+        if gap >= highlights.PAUSE or (highlights.SENTENCE_END.search(prev) and highlights._capital(ws[k]["w"])):
+            sq[k] = 0
+        elif gap >= BREATH or CLAUSE_END.search(prev) or highlights.SENTENCE_END.search(prev):
+            sq[k] = 1
+        if k:
+            eq[k - 1] = sq[k]
+    if n:
+        eq[n - 1] = 0
+    return {"ws": ws, "sq": sq, "eq": eq, "starts": [w["start"] for w in ws]}
+
+
+def _start_range(ws: List[Dict[str, Any]], i: int) -> Tuple[float, float]:
+    """Where a moment opening on word i may start: (earliest, with silence before it; latest, tight)."""
+    prev_end = ws[i - 1]["end"] + 0.02 if i else 0.0
+    tight = min(ws[i]["start"], max(prev_end, ws[i]["start"] - LEAD))
+    return min(tight, max(prev_end, ws[i]["start"] - PAD_BEFORE, 0.0)), tight
+
+
+def _end_range(ws: List[Dict[str, Any]], j: int, src_dur: float) -> Tuple[float, float]:
+    """Where a moment closing on word j may end: (tight; latest, with silence after it)."""
+    nxt = ws[j + 1]["start"] - 0.02 if j + 1 < len(ws) else src_dur
+    tight = max(ws[j]["end"], min(nxt, ws[j]["end"] + TAIL))
+    return tight, max(tight, min(nxt, ws[j]["end"] + PAD_AFTER, src_dur))
+
+
+def _tok(word: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", word.lower().replace("’", "'").replace("'", ""))
+
+
+def find_words(src: Dict[str, Any], phrase: str, a: float, b: float, reach: float = 2.0,
+               fuzzy: bool = False) -> Optional[Tuple[int, int]]:
+    """Where a phrase is said, nearest the stretch a–b: (first word, last word) indices, or None.
+    Exact words first; with `fuzzy`, the shortest run holding most of them (on-screen lines are
+    sometimes written a little differently from how he says them)."""
+    want = [t for t in (_tok(x) for x in re.split(r"[\s/]+", phrase or "")) if t]
+    ws = src["ws"]
+    if not want or not ws:
+        return None
+    k0 = bisect.bisect_left(src["starts"], a - reach)
+    k1 = bisect.bisect_right(src["starts"], b + reach)
+    toks = [_tok(ws[k]["w"]) for k in range(k0, k1)]
+
+    def dist(i: int, j: int) -> float:
+        mid = (ws[i]["start"] + ws[j]["end"]) / 2
+        return 0.0 if a <= mid <= b else min(abs(mid - a), abs(mid - b))
+
+    best = None
+    for i in range(len(toks) - len(want) + 1):
+        if toks[i:i + len(want)] == want:
+            cand = (dist(k0 + i, k0 + i + len(want) - 1), k0 + i, k0 + i + len(want) - 1)
+            best = cand if best is None or cand < best else best
+    if best or not fuzzy:
+        return (best[1], best[2]) if best else None
+    need = set(want) - set(_FILLER) or set(want)
+    for i in range(len(toks)):
+        if toks[i] not in need:
+            continue
+        seen = set()
+        for j in range(i, min(len(toks), i + len(want) * 2 + 4)):
+            if toks[j] in need:
+                seen.add(toks[j])
+            if len(seen) >= 0.7 * len(need) and toks[j] in need:
+                cand = (j - i, dist(k0 + i, k0 + j), k0 + i, k0 + j)
+                best = cand if best is None or cand < best else best
+                break
+    return (best[2], best[3]) if best else None
+
+
+def _punchline(m: Dict[str, Any], src: Dict[str, Any], style: str, a: float, b: float,
+               hit: float) -> Tuple[Optional[int], Optional[Tuple[int, int]]]:
+    """The word a moment builds to (the key word, the end of its line, or what's said at the hit) and,
+    when its on-screen text is his own words, where that line is said. (None, None): no words in it."""
+    ws = src["ws"]
+    k0 = max(0, bisect.bisect_left(src["starts"], a - 30.0))
+    inside = [k for k in range(k0, bisect.bisect_right(src["starts"], b))
+              if ws[k]["end"] > a + 0.05 and ws[k]["start"] < b - 0.05]
+    if not inside:
+        return None, None
+    line = None
+    if STYLES[style]["text"] in ("punch", "quote", "subtitle", "build") and str(m.get("text") or "").strip():
+        line = find_words(src, str(m["text"]), a, b, reach=1.5, fuzzy=True)
+    p = None
+    if str(m.get("key") or "").strip():
+        found = find_words(src, str(m["key"]), a, b, reach=0.5)
+        p = found[1] if found else None
+    if p is None and m.get("hit_auto"):
+        p = line[1] if line else inside[-1]                # no punchline given: his line's end, or where Claude's pick ends
+    if p is None:
+        p = min(inside, key=lambda k: 0.0 if ws[k]["start"] <= hit <= ws[k]["end"]
+                else min(abs(ws[k]["start"] - hit), abs(ws[k]["end"] - hit)))
+    return p, line
+
+
+Cut = Tuple[float, float, float, float, float, bool]     # cost, start earliest, start tight, end tight, end latest, centred
+
+
+def _cuts(src: Dict[str, Any], *, a: float, b: float, p: int, line: Optional[Tuple[int, int]], lo: float,
+          hi: float, costs: Tuple[float, float, float], bounds: Tuple[float, float], src_dur: float,
+          contain: Optional[Tuple[float, float]] = None, extra: float = 0.0,
+          hit: Optional[float] = None) -> List[Cut]:
+    """Every clean way to cut a moment around its punchline (word p): start on a word i ≤ p, end after
+    a word j ≥ p, inside `bounds`, lo–hi seconds long (silence may pad it). `contain`: the cut must
+    hold that stretch (for "make it longer"). A `hit` in the silence just before or after the words
+    is kept inside the cut (the reaction, the look)."""
+    ws, sq, eq = src["ws"], src["sq"], src["eq"]
+    lo_t, hi_t = bounds
+    line_fits = bool(line) and ws[line[1]]["end"] - ws[line[0]]["start"] + LEAD + TAIL <= hi
+    close = next((j for j in range(p, len(ws)) if eq[j] == 0), len(ws) - 1)   # the punchline's sentence ends here
+    stop_at = ws[close]["end"] + AFTER_PUNCH                                     # talking past that: only a little
+    out: List[Cut] = []
+    for i in range(bisect.bisect_left(src["starts"], lo_t - 1e-6), p + 1):
+        s_lo, s_hi = _start_range(ws, i)
+        s_lo = max(s_lo, lo_t)
+        if s_hi < lo_t - 1e-6:
+            continue
+        if contain and s_hi > contain[0] + 0.05:
+            break
+        if hit is not None and s_lo <= hit < s_hi:
+            s_hi = max(s_lo, hit - 0.05)
+        for j in range(p, len(ws)):
+            e_lo, e_hi = _end_range(ws, j, src_dur)
+            e_hi = min(e_hi, hi_t)
+            if hit is not None and e_lo < hit <= e_hi:
+                e_lo = min(e_hi, hit + 0.05)
+            if e_lo > hi_t + 1e-6 or e_lo - s_hi > hi + 0.05 or ws[j]["end"] > stop_at:
+                break
+            if contain and e_lo < contain[1] - 0.05:
+                continue
+            if e_hi - s_lo < lo - 0.05:
+                continue
+            c = extra + costs[sq[i]] + costs[eq[j]]
+            c += 0.25 * max(0.0, ws[j]["end"] - ws[p]["end"] - 0.6)          # end right after the punchline
+            if line_fits and (i > line[0] or j < line[1]):
+                c += 2.5                                                      # keep his line whole when it fits
+            c += 0.6 * (max(0.0, a - ws[i]["start"]) + max(0.0, ws[j]["end"] - b))   # stay in the pick
+            out.append((round(c, 4), s_lo, s_hi, e_lo, e_hi, False))
+    return out
+
+
+def _silent_cut(src: Dict[str, Any], a: float, b: float, hit: float, bounds: Tuple[float, float],
+                src_dur: float) -> List[Cut]:
+    """A moment with no words in it (a look, a reaction): any stretch of its silence around the hit."""
+    ws, starts = src["ws"], src["starts"]
+    k = bisect.bisect_left(starts, b - 0.05)              # the first word after it; the one before ends before it
+    r_lo = max(bounds[0], ws[k - 1]["end"] + 0.02 if k > 0 else 0.0, 0.0)
+    r_hi = min(bounds[1], ws[k]["start"] - 0.02 if k < len(ws) else src_dur, src_dur)
+    if r_hi <= r_lo:
+        return []
+    hit = min(max(hit, r_lo), r_hi)
+    return [(0.0, r_lo, hit, hit, r_hi, True)]
+
+
+def _options(cuts: List[Cut], lo: float, hi: float, natural: float) -> List[Tuple[int, float, int]]:
+    """For each length (in tenths of a second) inside lo–hi: the best cut and what it costs —
+    edges, silence used as padding, distance from the moment's natural length."""
+    best: Dict[int, Tuple[float, int]] = {}
+    u_lo, u_hi = int(math.ceil(lo / UNIT - 1e-6)), int(math.floor((hi + 0.05) / UNIT + 1e-6))
+    for idx, (c, s_lo, s_hi, e_lo, e_hi, centred) in enumerate(cuts):
+        core, top = max(0.0, e_lo - s_hi), e_hi - s_lo
+        for u in range(max(u_lo, int(math.ceil((core - 0.05) / UNIT))),
+                       min(u_hi, int(math.floor((top + 0.05) / UNIT))) + 1):
+            d = min(max(u * UNIT, core), top)
+            cost = c + (0.0 if centred else 0.35 * (d - core)) + 0.25 * abs(d - natural)
+            key = int(math.ceil(d / UNIT - 1e-6))            # counted at its real length, rounded up
+            if key not in best or cost < best[key][0]:
+                best[key] = (cost, idx)
+    return sorted((u, round(cost, 4), idx) for u, (cost, idx) in best.items())
+
+
+def _realize(cut: Cut, d: float) -> Tuple[float, float]:
+    """The cut at length d: silence goes after the words first (the reaction), then before them."""
+    _, s_lo, s_hi, e_lo, e_hi, centred = cut
+    d = min(max(d, e_lo - s_hi), e_hi - s_lo)
+    if centred:
+        s = min(max(s_hi - 0.4 * d, s_lo), e_hi - d)
+        return s, s + d
+    extra = d - (e_lo - s_hi)
+    e = e_lo + min(extra, e_hi - e_lo)
+    s = s_hi - min(extra - (e - e_lo), s_hi - s_lo)
+    return s, e
+
+
+def _pick_span(m: Dict[str, Any]) -> Tuple[float, float, float]:
+    """The stretch a moment is cut from — what Claude picked (or what gs set by hand) — and its hit."""
+    pick = m.get("pick") or [m["start"], m["end"], m.get("hit")]
+    a, b = float(pick[0]), float(pick[1])
+    hit = pick[2] if len(pick) > 2 and pick[2] is not None else m.get("hit")
+    hit = float(hit) if hit is not None else (a + b) / 2
+    return a, b, min(max(hit, a), b)
+
+
+def prepare_moment(m: Dict[str, Any], style: str, src: Dict[str, Any], src_dur: float) -> Dict[str, Any]:
+    """All the clean ways to play one moment in this style, priced by length (see _options)."""
+    st = STYLES[style]
+    lo, hi = st["window"]
+    a, b, hit = _pick_span(m)
+    costs = _edge_costs(style)
+    p, line = _punchline(m, src, style, a, b, hit) if src["ws"] else (None, None)
+    prep: Dict[str, Any] = {"lo": lo, "hi": hi, "hit": hit, "a": a, "b": b, "manual": bool(m.get("manual")),
+                            "punch_at": src["ws"][p]["start"] if p is not None else None}
+    if m.get("manual"):                                   # his size wins over the style's window
+        d = b - a
+        prep["lo"], prep["hi"] = min(lo, d), max(hi, d)
+        cuts: List[Cut] = [(0.0, a, a, b, b, False)]
+        if p is not None:                                 # only if the length budget leaves no other way
+            cuts += _cuts(src, a=a, b=b, p=p, line=line, lo=min(lo, d), hi=d, costs=costs, bounds=(a, b),
+                          src_dur=src_dur, extra=15.0)
+        natural = d
+    else:
+        natural = min(max(st["ideal"], lo), max(lo, b - a), hi)
+        bounds = (max(0.0, a - REACH_BEFORE), min(src_dur, b + REACH_AFTER))
+        if p is None:
+            cuts = _silent_cut(src, a, b, hit, bounds, src_dur)
+        else:
+            cuts = _cuts(src, a=a, b=b, p=p, line=line, lo=lo, hi=hi, costs=costs, bounds=bounds, src_dur=src_dur,
+                         hit=None if m.get("hit_auto") else hit)
+    prep.update(cuts=cuts, natural=natural, opts=_options(cuts, prep["lo"], prep["hi"], natural))
+    if not prep["opts"]:
+        prep["why"] = (f"it's only {b - a:.1f} s, and there's no clean way to stretch it to {lo:g} s"
+                       if b - a < lo else f"it can't be cut to {window_text(style)} without cutting into his words")
+    return prep
+
+
+def cut_moment(m: Dict[str, Any], prep: Dict[str, Any], units: Optional[int] = None,
+               idx: Optional[int] = None) -> Dict[str, Any]:
+    """The moment cut one way (its cheapest, unless told which): new start, end and hit."""
+    if units is None or idx is None:
+        units, _, idx = min(prep["opts"], key=lambda o: o[1])
+    s, e = _realize(prep["cuts"][idx], units * UNIT)
+    s, e = math.floor(s * 100 + 1e-6) / 100, math.ceil(e * 100 - 1e-6) / 100     # rounding never cuts a word
+    a, b, hit = prep["a"], prep["b"], prep["hit"]
+    at = hit
+    if prep.get("punch_at") is not None and (m.get("hit_auto") or not s <= hit <= e):
+        at = prep["punch_at"]                                # the punchline is the instant it builds to
+    out = dict(m)
+    out.update(start=s, end=e, hit=round(min(max(at, s), e), 2))
+    out["pick"] = [round(a, 2), round(b, 2), round(hit, 2)]
+    return out
+
+
+def _label(m: Dict[str, Any]) -> str:
+    text = str(m.get("text") or "").strip()
+    return f"“{text[:40]}”" if text else f"the moment at {_clock(float(m.get('start') or 0))}"
+
+
+def _clock(t: float) -> str:
+    t = max(0, int(round(t)))
+    return f"{t // 3600}:{t // 60 % 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+
+
+def _drop_cost(m: Dict[str, Any], k: int, n: int) -> float:
+    """What leaving a moment out costs: far more than shortening any; the weakest go first,
+    the opener and the closer last; the drop never; one gs sized himself almost never."""
+    if m.get("drop"):
+        return NEVER
+    if m.get("manual"):
+        return 400.0
+    strength = highlights._num(m.get("strength"), 5.0)
+    return 40.0 + 6.0 * min(10.0, max(0.0, strength)) + (8.0 if k == 0 else 0.0) + (5.0 if k == n - 1 else 0.0)
+
+
+def fit_budget(preps: List[Dict[str, Any]], moments: List[Dict[str, Any]], target: float, lower: float,
+               upper: float, lam: float = 0.4) -> Tuple[List[Optional[Tuple[int, int]]], float]:
+    """Choose each moment's length (or leave it out) so that together they come to `target`, never
+    outside lower–upper when that can be helped. Returns per moment (units, cut index) or None (left
+    out), and the total seconds. Shortening is always tried before leaving anything out."""
+    import numpy as np
+    n = len(preps)
+    size = sum(max((o[0] for o in p["opts"]), default=0) for p in preps) + 2
+    best = np.full(size, NEVER)
+    best[0] = 0.0
+    backs = []
+    for k, prep in enumerate(preps):
+        new = best + _drop_cost(moments[k], k, n)
+        arg = np.where(best < NEVER / 2, -1, -2)
+        for oi, (u, cost, _) in enumerate(prep["opts"]):
+            if u >= size:
+                continue
+            cand = np.full(size, NEVER)
+            cand[u:] = best[:size - u] + cost
+            better = cand < new
+            new[better] = cand[better]
+            arg[better] = oi
+        best = np.minimum(new, NEVER)
+        backs.append(arg)
+    units = np.arange(size)
+    ok = best < NEVER / 2
+    t_lo, t_hi = int(math.ceil(lower / UNIT - 1e-6)), int(math.floor(upper / UNIT + 1e-6))
+    inside = ok & (units >= t_lo) & (units <= t_hi)
+    if inside.any():
+        score = np.where(inside, best + lam * np.abs(units - target / UNIT) * UNIT, np.inf)
+    else:                                       # too little material (or too much sized by hand): as near as it's
+        miss = np.maximum(t_lo - units, 0) + np.maximum(units - t_hi, 0)          # worth getting, not at any price
+        score = np.where(ok, best + 1.0 * miss * UNIT, np.inf)
+    t = int(np.argmin(score))
+    total = t * UNIT
+    picks: List[Optional[Tuple[int, int]]] = [None] * n
+    for k in range(n - 1, -1, -1):
+        oi = int(backs[k][t])
+        if oi >= 0:
+            u, _, idx = preps[k]["opts"][oi]
+            picks[k] = (u, idx)
+            t -= u
+    return picks, total
+
+
+def length_budget(length: float, limits: Optional[Dict[str, Any]], notes: List[str]) -> Dict[str, float]:
+    """The length to aim for and the most / least the edit may be: ±15 % of the length asked, inside the
+    campaign's own limits when it has them."""
+    L = float(length)
+    limits = limits or {}
+    name = str(limits.get("name") or "The campaign")
+    cmax = highlights._num(limits.get("max"), 0.0)
+    cmin = highlights._num(limits.get("min"), 0.0)
+    if cmax and cmax < 10:
+        notes.append(f"{name} allows at most {cmax:.0f} s — shorter than any edit can be — so its check will "
+                     "block this one. Make clips for it instead.")
+        cmax = 0.0
+    if cmax and L > cmax + 1e-6:
+        notes.append(f"{name} allows at most {cmax:.0f} s, so the edit is kept under that.")
+        L = cmax
+    if cmin and L < cmin - 1e-6 and (not cmax or cmin <= cmax):
+        notes.append(f"{name} asks for at least {cmin:.0f} s, so the edit is made that long.")
+        L = cmin
+    upper, lower = L * (1 + BUDGET), L * (1 - BUDGET)
+    if cmax:
+        upper = min(upper, cmax)
+    if cmin:
+        lower = max(lower, min(cmin, upper))
+    return {"length": L, "upper": upper, "lower": lower, "target": min(L, upper - 0.02 * L)}
+
+
 # --- Claude picks the moments --------------------------------------------------------------
 
 PICK_TOOL = {
@@ -386,6 +805,8 @@ PICK_TOOL = {
                 "key": {"type": "string", "description": "Optional: the one word in `text` to highlight."},
                 "kind": {"type": "string", "enum": ["quote", "funny", "hype", "reaction", "money", "story", "action"]},
                 "drop": {"type": "boolean", "description": "true for the ONE moment that lands on the song's drop."},
+                "strength": {"type": "integer", "description": "1-10: how strong this moment is on its own "
+                             "(10 = the best). When the edit runs long, the weakest are left out first."},
                 "why": {"type": "string", "description": "A few words: why this moment."},
             }, "required": ["text"]}},
         },
@@ -408,28 +829,28 @@ on a line that sticks — ideally one that leads naturally back into the opening
 """
 
 
-def before_drop(style: str, sound: Optional[Dict[str, Any]]) -> Optional[Tuple[int, float]]:
-    """For a beat edit on this song: how many shots fit before the drop, and how many seconds in it comes."""
+def before_drop(style: str, sound: Optional[Dict[str, Any]], length: Optional[float] = None) -> Optional[Tuple[int, float]]:
+    """For a beat edit on this song: how many moments fit before the drop, and how many seconds in it comes."""
     style = style_key(style)
     st = STYLES[style]
     analysis = (sound or {}).get("analysis") or {}
     if st["pace"] != "beat" or len(analysis.get("beats") or []) < 4:
         return None
-    g = beat_grid(analysis)
-    first_real = next(i for i, t in enumerate(g["t"]) if t >= -0.01)
-    drop_i = _nearest(g["t"], float(analysis.get("drop") or 0.0))
-    pre = drop_i - max(first_real, drop_i - st["pre_beats"])
-    build = _patterns(style, g["period"])[0][0]
-    return -(-pre // build), pre * g["period"]
+    try:
+        c = _beat_cuts(style, float(length or st["length"]), analysis, [])
+    except ValueError:
+        return None
+    return max(1, c["cap_before"]) if c["kd"] else 0, c["kd"] * c["period"]
 
 
 def pick_moments(sources: List[Dict[str, Any]], style: str, theme: str, length: int,
                  guidance: str = "", candidates: Optional[List[Dict[str, Any]]] = None,
-                 sound: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                 sound: Optional[Dict[str, Any]] = None, look_for: Optional[List[str]] = None) -> Dict[str, Any]:
     """One Claude call → the edit's hook, caption, hashtags and moments in play order.
 
     `candidates` (moments already found and scored, e.g. by Creator Scan) are
-    offered instead of whole transcripts when given."""
+    offered instead of whole transcripts when given. `look_for`: the campaign brief's
+    "what to look for" items, word for word."""
     style = style_key(style)
     st = STYLES[style]
     index_of = {s["id"]: i + 1 for i, s in enumerate(sources)}
@@ -439,16 +860,28 @@ def pick_moments(sources: List[Dict[str, Any]], style: str, theme: str, length: 
     else:
         budget = max(8000, 90000 // max(1, len(sources)))
         body = "\n\n".join(_transcript_block(i + 1, s, budget) for i, s in enumerate(sources))
-    lo, hi = st["count"]
+    lo, hi = count_for(style, length)
+    w_lo, w_hi = st["window"]
     prompt = (body
               + f"\n\nTHE EDIT: a {st['name']} edit, about {length} seconds long. {st['what']}\n"
               + f"What it's about: {theme.strip() or 'the best moments'}\n"
-              + f"Moments: {st['brief']} Return {lo} to {hi} moments.")
-    fit = before_drop(style, sound)
-    if fit:
+              + f"Moments: {st['brief'].format(w=f'{w_lo:g} to {w_hi:g} seconds')} Return {lo} to {hi} moments.\n"
+              + f"LENGTH: every moment plays {w_lo:g} to {w_hi:g} seconds — ClipAgent cuts a longer one down to its "
+                f"punchline on whole words, so give each moment's `hit` (the punchline, the key word, the instant it "
+                f"builds to) and keep its start/end tight around it. Together the moments should fill about "
+                f"{length} seconds (±15%). Give every moment a `strength` (1-10): when it runs long, the weakest "
+                f"are left out first.")
+    wants = [str(x).strip() for x in (look_for or []) if str(x).strip()][:12]
+    if wants:
+        prompt += ("\nWHAT THIS CAMPAIGN WANTS TO SEE (from its brief, word for word) — pick moments that show "
+                   "these:\n" + "\n".join(f"- {x[:200]}" for x in wants))
+    fit = before_drop(style, sound, length)
+    if fit and fit[0]:
         k, secs = fit
         prompt += (f"\nThe song drops {secs:.1f} seconds in: only {k} moment{'s' if k != 1 else ''} play before the "
                    f"drop (the opener{' and the build' if k > 1 else ''}), the drop moment comes next, the rest after.")
+    elif fit:
+        prompt += "\nThe song drops right at the start: the drop moment plays first, the rest after it."
     system = PICK_SYSTEM + (f"\n\nCAMPAIGN RULES (these override the rest):\n{guidance}" if guidance else "")
     client = highlights._client()
     message = client.messages.create(model=CLAUDE_MODEL, max_tokens=6000, system=system, tools=[PICK_TOOL],
@@ -457,12 +890,13 @@ def pick_moments(sources: List[Dict[str, Any]], style: str, theme: str, length: 
     got = toolio.tool_inputs(message)
     if not got:
         raise RuntimeError("Claude's answer couldn't be read — try again")
-    return read_pick(got[0], sources, style, candidates)
+    return read_pick(got[0], sources, style, candidates, length)
 
 
 def read_pick(reply: Dict[str, Any], sources: List[Dict[str, Any]], style: str,
-              candidates: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Claude's picks, checked: real times, no overlaps, text that was really said, one drop."""
+              candidates: Optional[List[Dict[str, Any]]] = None, length: Optional[float] = None) -> Dict[str, Any]:
+    """Claude's picks, checked: real times, no overlaps, text that was really said, one drop.
+    (Their length is checked later, when the timeline is laid out: see fit_moments.)"""
     style = style_key(style)
     st = STYLES[style]
     words_by = {s["id"]: transcribe.in_order(_loads(s.get("transcript"), {}).get("words") or []) for s in sources}
@@ -477,10 +911,12 @@ def read_pick(reply: Dict[str, Any], sources: List[Dict[str, Any]], style: str,
         if candidates and m.get("candidate") is not None:
             ci = highlights._int(m.get("candidate"), 0) - 1
             cand = candidates[ci] if 0 <= ci < len(candidates) else None
+        hit_given = m.get("hit") is not None
         if cand:
             job = next((s for s in sources if s["id"] == cand["source"]), None)
             start, end = float(cand["start"]), float(cand["end"])
             hit_default = float(cand.get("hit", (start + end) / 2))
+            hit_given = hit_given or cand.get("hit") is not None
         else:
             v = highlights._int(m.get("video"), 0) - 1
             job = sources[v] if 0 <= v < len(sources) else None
@@ -501,6 +937,7 @@ def read_pick(reply: Dict[str, Any], sources: List[Dict[str, Any]], style: str,
         hit = highlights._num(m.get("hit"), hit_default)
         if not start <= hit <= end:
             hit = hit_default if start <= hit_default <= end else (start + end) / 2
+            hit_given = False
         text = highlights._text(m.get("text"))[:160]
         said = _said_between(words_by[job["id"]], start - 3, end + 3)
         if text and st["text"] in ("punch", "quote") and not (_words_said(text, said) and _numbers_said(text, said)):
@@ -512,15 +949,19 @@ def read_pick(reply: Dict[str, Any], sources: List[Dict[str, Any]], style: str,
         key = highlights._text(m.get("key"))
         if key and key.lower() not in text.lower():
             key = ""
+        strength = highlights._num(m.get("strength"), highlights._num((cand or {}).get("score"), 50.0) / 10.0)
         moments.append({
             "id": f"m{k + 1}", "source": job["id"], "start": round(start, 2), "end": round(end, 2),
             "hit": round(hit, 2), "text": text, "key": key[:40],
             "kind": str(m.get("kind") or "quote"), "drop": bool(m.get("drop")),
+            "strength": round(min(10.0, max(1.0, strength)), 1),
             "why": highlights._text(m.get("why"))[:160],
         })
+        if not hit_given:
+            moments[-1]["hit_auto"] = True                   # no punchline given: the cut finds it from his words
     if not moments:
         raise RuntimeError("Claude didn't find moments that fit — try another theme or more videos")
-    lo, hi = st["count"]
+    lo, hi = count_for(style, length or st["length"])
     if len(moments) > hi:                                    # keep the opener, the drop and the closer
         keep = {0, len(moments) - 1} | {i for i, m in enumerate(moments) if m["drop"]}
         for i in range(len(moments)):
@@ -544,19 +985,6 @@ def read_pick(reply: Dict[str, Any], sources: List[Dict[str, Any]], style: str,
     return {"title": highlights._text(reply.get("title"))[:80], "hook": hook,
             "caption": highlights._text(reply.get("caption"))[:600], "hashtags": tags, "moments": moments,
             "notes": notes}
-
-
-def snap_moments(moments: List[Dict[str, Any]], style: str,
-                 words_by_source: Dict[str, List[Dict[str, Any]]]) -> None:
-    """Voice edits play whole sentences: put each moment's edges on sentence edges."""
-    if STYLES[style_key(style)]["pace"] != "speech":
-        return
-    for m in moments:
-        words = words_by_source.get(m["source"]) or []
-        if words:
-            s, e = highlights.clean_bounds(m["start"], m["end"], words, min_len=1.5)
-            m["start"], m["end"] = round(s, 2), round(e, 2)
-            m["hit"] = round(min(max(m["hit"], m["start"]), m["end"]), 2)
 
 
 # --- speed curves ------------------------------------------------------------------------
@@ -699,13 +1127,21 @@ FLASHES = {"few": "Only on the drop", "normal": "As the style does", "many": "On
 
 def _patterns(style: str, period: float, pace: int = 0) -> Tuple[List[int], int, List[int]]:
     """How many beats each cut lasts: before the drop, the drop's hold, after the drop —
-    halved for "faster", doubled for "slower"."""
+    halved for "faster", doubled for "slower" — and never one cut longer than the style's
+    longest moment (a slow song halves it)."""
     build, hold, after = _base_patterns(style, period)
     if pace > 0:
-        return [max(1, b // 2) for b in build], max(2, hold // 2), [max(1, a // 2) for a in after]
-    if pace < 0:
-        return [min(8, b * 2) for b in build], min(16, hold * 2), [min(8, a * 2) for a in after]
-    return build, hold, after
+        build, hold, after = [max(1, b // 2) for b in build], max(2, hold // 2), [max(1, a // 2) for a in after]
+    elif pace < 0:
+        build, hold, after = [min(8, b * 2) for b in build], min(16, hold * 2), [min(8, a * 2) for a in after]
+    hi = STYLES[style]["window"][1]
+
+    def cap(n: int) -> int:
+        while n > 1 and n * period > hi + 1e-6:
+            n //= 2
+        return n
+
+    return [cap(b) for b in build], cap(hold), [cap(a) for a in after]
 
 
 def _base_patterns(style: str, period: float) -> Tuple[List[int], int, List[int]]:
@@ -723,32 +1159,158 @@ def _base_patterns(style: str, period: float) -> Tuple[List[int], int, List[int]
     return [k], k, [k]
 
 
-def _spread(moments: List[Dict[str, Any]], slots: int, notes: List[str]) -> List[Tuple[Dict[str, Any], int]]:
-    """Share `slots` cuts between moments in order: each gets at least one, longer ones get more."""
-    if not moments:
-        return []
-    if slots <= 0:
-        notes.append(f"{len(moments)} moment{'s' if len(moments) > 1 else ''} before the drop didn't fit and "
-                     f"{'were' if len(moments) > 1 else 'was'} left out.")
-        return []
-    if len(moments) > slots:
-        keep = [0, len(moments) - 1] if slots >= 2 else [0]
-        step = (len(moments) - 1) / max(1, slots - 1)
-        keep = sorted(set(int(round(i * step)) for i in range(slots)) | set(keep))[:slots]
-        dropped = len(moments) - len(keep)
-        notes.append(f"{dropped} moment{'s' if dropped > 1 else ''} didn't fit the length and "
-                     f"{'were' if dropped > 1 else 'was'} left out.")
-        moments = [moments[i] for i in keep]
-    weights = [min(6.0, max(1.0, m["end"] - m["start"])) for m in moments]
-    extra = slots - len(moments)
-    total = sum(weights)
-    shares = [w / total * extra for w in weights]
-    counts = [1 + int(s) for s in shares]
-    rest = slots - sum(counts)
-    order = sorted(range(len(moments)), key=lambda i: shares[i] - int(shares[i]), reverse=True)
-    for i in order[:rest]:
-        counts[i] += 1
-    return list(zip(moments, counts))
+def _counts(durs: List[float], lo: float, hi: float) -> set:
+    """Into how many runs the shots `durs` (in order) can be grouped, every run lo–hi seconds long."""
+    reach = [set() for _ in range(len(durs) + 1)]
+    reach[0].add(0)
+    for j in range(1, len(durs) + 1):
+        d = 0.0
+        for j0 in range(j - 1, -1, -1):
+            d += durs[j0]
+            if d > hi + 1e-6:
+                break
+            if d >= lo - 1e-6 and reach[j0]:
+                reach[j] |= {g + 1 for g in reach[j0]}
+    return reach[len(durs)]
+
+
+def _split(durs: List[float], wants: List[float], los: List[float], his: List[float]) -> Optional[List[int]]:
+    """Group the shots `durs` into exactly len(wants) runs in order — run k lasting los[k]–his[k]
+    seconds, as near wants[k] as the beats allow. → shots per run, or None."""
+    n, k = len(wants), len(durs)
+    if n == 0:
+        return [] if k == 0 else None
+    pre = [0.0]
+    for d in durs:
+        pre.append(pre[-1] + d)
+    inf = float("inf")
+    best = [[inf] * (k + 1) for _ in range(n + 1)]
+    back = [[-1] * (k + 1) for _ in range(n + 1)]
+    best[0][0] = 0.0
+    for g in range(1, n + 1):
+        for j in range(g, k + 1):
+            for j0 in range(j - 1, g - 2, -1):
+                d = pre[j] - pre[j0]
+                if d > his[g - 1] + 1e-6:
+                    break
+                if d < los[g - 1] - 1e-6 or best[g - 1][j0] == inf:
+                    continue
+                c = best[g - 1][j0] + (d - wants[g - 1]) ** 2
+                if c < best[g][j]:
+                    best[g][j], back[g][j] = c, j0
+    if best[n][k] == inf:
+        return None
+    counts, j = [], k
+    for g in range(n, 0, -1):
+        counts.append(j - back[g][j])
+        j = back[g][j]
+    return counts[::-1]
+
+
+def _weakest(moments: List[Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
+    """The n moments to leave out first: never one gs sized himself if it can be helped, then the
+    lowest strength, keeping the closer, later ones before earlier ones."""
+    last = len(moments) - 1
+    order = sorted(range(len(moments)), key=lambda i: (bool(moments[i].get("manual")),
+                                                         highlights._num(moments[i].get("strength"), 5.0),
+                                                         i == last, -i))
+    return [moments[i] for i in order[:max(0, n)]]
+
+
+def _beat_speed(style: str, fx: Dict[str, bool]) -> float:
+    """About how fast a beat style plays its footage (slow-mo styles use less source per second)."""
+    if fx.get("slowmo"):
+        return {"aura": 0.6, "money": 0.8}.get(style, 1.0)
+    return 1.0
+
+
+def _assign(ordered: List[Dict[str, Any]], di: int, c: Dict[str, Any], style: str, speed: float,
+            notes: List[str], left: List[Tuple[Dict[str, Any], str]], move: bool) -> Optional[List[Tuple[Dict[str, Any], int]]]:
+    """Which moment plays on which shots of a beat edit: each moment one run of consecutive shots
+    lasting its style's window, in Claude's order; the drop moment's run starts on the drop.
+    `move`: moments that don't fit before the drop may play right after it. None: these moments
+    can't fill this many beats (the caller makes the edit shorter)."""
+    lo, hi = STYLES[style]["window"]
+    durs, ds = c["durs"], c["ds"]
+
+    def win(m: Dict[str, Any]) -> Tuple[float, float]:
+        if m.get("manual"):
+            d = (m["end"] - m["start"]) / speed
+            return min(lo, d), max(hi, d)
+        return lo, hi
+
+    def want(m: Dict[str, Any]) -> float:
+        a, b = win(m)
+        return min(max((m["end"] - m["start"]) / speed, a), b)
+
+    sec_lo = min(win(m)[0] for m in ordered)
+    sec_hi = max(win(m)[1] for m in ordered)
+    drop_m = ordered[di]
+    before, after = list(ordered[:di]), list(ordered[di + 1:])
+    moved = 0
+    if ds:
+        feas = _counts(durs[:ds], sec_lo, sec_hi)
+        if not feas:
+            return None
+        if len(before) < min(feas):                         # too few to fill the build: borrow the next ones
+            while len(before) < min(feas) and after:
+                before.append(after.pop(0))
+            if len(before) < min(feas):
+                return None
+        fit = [g for g in feas if g <= len(before)]
+        nb = max(fit)
+        if nb < len(before):
+            if not move:
+                return None
+            moved = len(before) - nb
+            after = before[nb:] + after
+            before = before[:nb]
+    elif before:
+        if not move:
+            return None
+        moved = len(before)
+        after = before + after
+        before = []
+    best = None
+    lo_d, hi_d = win(drop_m)
+    total = 0.0
+    for r in range(1, len(durs) - ds + 1):
+        total += durs[ds + r - 1]
+        if total > hi_d + 1e-6:
+            break
+        if total < lo_d - 1e-6:
+            continue
+        rest = durs[ds + r:]
+        feas_a = _counts(rest, sec_lo, sec_hi) if rest else {0}
+        fit = [g for g in feas_a if g <= len(after)]
+        if not fit:
+            continue
+        key = (len(after) - max(fit), r)
+        if best is None or key < best[0]:
+            best = (key, r, max(fit))
+    if best is None:
+        return None
+    _, r, na = best
+    if na < len(after):
+        out = {id(m) for m in _weakest(after, len(after) - na)}
+        for m in after:
+            if id(m) in out:
+                left.append((m, "it didn't fit the length"))
+        after = [m for m in after if id(m) not in out]
+    rest = durs[ds + r:]
+
+    def split(ms: List[Dict[str, Any]], part: List[float]) -> Optional[List[int]]:
+        got = _split(part, [want(m) for m in ms], [win(m)[0] for m in ms], [win(m)[1] for m in ms])
+        return got if got is not None else _split(part, [want(m) for m in ms], [sec_lo] * len(ms),
+                                                  [sec_hi] * len(ms))
+
+    counts_b, counts_a = split(before, durs[:ds]), split(after, rest)
+    if counts_b is None or counts_a is None:
+        return None
+    if moved:
+        notes.append(f"{moved} moment{'s' if moved > 1 else ''} didn't fit before the drop, so "
+                     f"{'they play' if moved > 1 else 'it plays'} right after it.")
+    return list(zip(before, counts_b)) + [(drop_m, r)] + list(zip(after, counts_a))
 
 
 def _place(m: Dict[str, Any], segs: List[Dict[str, Any]], src_dur: float, mode: str) -> None:
@@ -820,15 +1382,28 @@ def section_drop(analysis: Dict[str, Any], a: float, b: float) -> Optional[float
 
 
 def _beat_cuts(style: str, length: float, analysis: Dict[str, Any], notes: List[str], pace: int = 0,
-               song_start: Optional[float] = None) -> Dict[str, Any]:
+               song_start: Optional[float] = None, *, want_beats: Optional[int] = None,
+               pre_beats: Optional[int] = None, budget: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """Where a beat edit cuts on this song: the song section, the drop, and every slot (in beats).
-    `song_start` (song seconds) picks the part of the song by hand; otherwise it's the part around the drop."""
+    `song_start` (song seconds) picks the part of the song by hand; otherwise it's the part around the drop.
+    `want_beats` forces the length in beats, `pre_beats` how many beats play before the drop, and
+    `budget` keeps the length inside the edit's length budget (see length_budget)."""
     st = STYLES[style]
+    lo_w, hi_w = st["window"]
     g = beat_grid(analysis)
     grid, period, song_len = g["t"], g["period"], g["duration"]
     first_real = next(i for i, t in enumerate(grid) if t >= -0.01)
-    want = max(8, int(round(length / period / 4.0)) * 4)                # whole bars
+    if want_beats is None:
+        want = max(8, int(round(length / period / 4.0)) * 4)            # whole bars
+        if budget:                                                      # …inside ±15 % (and the campaign's limits)
+            while want > 8 and want * period > budget["upper"] + 1e-6:
+                want -= 4
+            while want * period < budget["lower"] - 1e-6 and (want + 4) * period <= budget["upper"] + 1e-6:
+                want += 4
+    else:
+        want = int(want_beats)
     asked = want
+    pre_n = st["pre_beats"] if pre_beats is None else int(pre_beats)
     if song_start is not None:
         bars = [i for i in range(first_real, len(grid)) if (i - g["phase"]) % 4 == 0 and grid[i] <= song_len]
         start_i = min(bars, key=lambda i: abs(grid[i] - float(song_start))) if bars else first_real
@@ -842,7 +1417,7 @@ def _beat_cuts(style: str, length: float, analysis: Dict[str, Any], notes: List[
             notes.append("Nothing in the part you picked kicks in hard, so the strongest moment lands on bar 3.")
     else:
         drop_i = _nearest(grid, float(analysis.get("drop") or grid[first_real]))
-        start_i = max(first_real, drop_i - st["pre_beats"])
+        start_i = max(first_real, drop_i - pre_n)
         while grid[start_i + want] > song_len + 0.05 and start_i - 4 >= first_real:
             start_i -= 4
     shortest = max(8, -int(-7.0 // (4 * period)) * 4)                 # never under ~7 s
@@ -871,45 +1446,117 @@ def _beat_cuts(style: str, length: float, analysis: Dict[str, Any], notes: List[
         cuts.append(k)
         i += 1
     if len(cuts) > 3 and cuts[-1] - cuts[-2] < 2 and cuts[-2] != kd and cuts[-2] - cuts[-3] < 4:
-        cuts.pop(-2)                                         # the last shot gets at least two beats
+        last = grid[start_i + cuts[-1]] - grid[start_i + cuts[-3]]
+        if last <= hi_w + 1e-6:
+            cuts.pop(-2)                                     # the last shot gets at least two beats
     slots = list(zip(cuts[:-1], cuts[1:]))
+    durs = [grid[start_i + b] - grid[start_i + a] for a, b in slots]
+    ds = next(j for j, (a, _) in enumerate(slots) if a == kd)
+    before = _counts(durs[:ds], lo_w, hi_w) if ds else set()
     return {"grid": grid, "period": period, "phase": g["phase"], "start_i": start_i, "want": want, "kd": kd,
-            "s0": grid[start_i], "slots": slots, "ds": next(j for j, (a, _) in enumerate(slots) if a == kd)}
+            "s0": grid[start_i], "slots": slots, "ds": ds, "durs": durs, "shortest": shortest,
+            "cap_before": max(before) if before else 0, "drop_i": start_i + kd, "first_real": first_real}
 
 
 def slots_for(style: str, sound: Optional[Dict[str, Any]], length: float, pace: int = 0,
               song_start: Optional[float] = None) -> Optional[Tuple[int, int]]:
-    """For a beat edit: (shots before the drop, shots in all)."""
+    """For a beat edit: (moments that fit before the drop, moments that fit in all) — each moment
+    one run of shots lasting the style's window."""
     analysis = (sound or {}).get("analysis") or {}
-    if STYLES[style_key(style)]["pace"] != "beat" or len(analysis.get("beats") or []) < 4:
+    style = style_key(style)
+    if STYLES[style]["pace"] != "beat" or len(analysis.get("beats") or []) < 4:
         return None
-    c = _beat_cuts(style_key(style), length, analysis, [], pace, song_start)
-    return c["ds"], len(c["slots"])
+    c = _beat_cuts(style, length, analysis, [], pace, song_start)
+    lo, hi = STYLES[style]["window"]
+    durs, ds = c["durs"], c["ds"]
+    total, after = 0.0, 0
+    for r in range(1, len(durs) - ds + 1):                   # the drop's run, then as many runs as fit after it
+        total += durs[ds + r - 1]
+        if total > hi + 1e-6:
+            break
+        if total >= lo - 1e-6:
+            rest = durs[ds + r:]
+            after = max(after, max(_counts(rest, lo, hi) if rest else {0}, default=0))
+    return c["cap_before"], c["cap_before"] + 1 + after
+
+
+def _beat_plan(ordered: List[Dict[str, Any]], style: str, length: float, analysis: Dict[str, Any],
+               fx: Dict[str, bool], notes: List[str], left: List[Tuple[Dict[str, Any], str]], pace: int,
+               song_start: Optional[float], budget: Optional[Dict[str, float]]) -> Tuple[Dict[str, Any], list]:
+    """The song section and which moment plays on which shots, every moment inside its window:
+    the longest edit (up to the length asked) these moments can fill; when Claude put more moments
+    before the drop than its usual build holds, the song starts up to one build earlier so they
+    keep their order — else they play right after the drop."""
+    st = STYLES[style]
+    drop_m = next(m for m in ordered if m.get("drop"))
+    di = ordered.index(drop_m)
+    speed = _beat_speed(style, fx)
+    c0 = _beat_cuts(style, length, analysis, [], pace, song_start, budget=budget)
+    want0, shortest, period = c0["want"], c0["shortest"], c0["period"]
+    lower = (budget or {}).get("lower", 0.0)
+    base = st["pre_beats"]
+    tries = ([(p, False) for p in range(base, 2 * base + 1, 4)] + [(base, True), (0, True)]
+             if song_start is None else [(None, True)])
+    ids = [m["id"] for m in ordered]
+    found = []
+    for want in range(want0, min(want0, shortest) - 1, -4):
+        seen = set()
+        for pre, move in tries:
+            cn: List[str] = []
+            try:
+                c = _beat_cuts(style, length, analysis, cn, pace, song_start, want_beats=want, pre_beats=pre)
+            except ValueError:
+                continue
+            if (c["want"], c["kd"], move) in seen or (c["ds"] and not c["cap_before"]):
+                continue                                     # the same cut again, or no room for one shot before the drop
+            seen.add((c["want"], c["kd"], move))
+            ln: List[Tuple[Dict[str, Any], str]] = []
+            runs = _assign(ordered, di, c, style, speed, cn, ln, move)
+            if runs is None:
+                continue
+            played = [m["id"] for m, _ in runs]
+            kept = played == [i for i in ids if i in played]
+            # best first: within the length budget, in the order given, the longest, the shortest build
+            found.append(((c["want"] * period >= lower - 1e-6, kept, c["want"], -c["kd"]), c, runs, cn, ln))
+            break                                            # the first that works is the best for this length
+        if found and max(f[0][:2] for f in found) == (True, True):
+            break
+        if found and want * period < lower - 1e-6:
+            break                                            # nothing longer is left to find
+    if not found:
+        n = len(ordered)
+        raise ValueError(f"There aren't enough moments for {_a(st['name'], low=True)} edit: each one plays "
+                         f"{window_text(style)}, and only {n} {'is' if n == 1 else 'are'} on. Switch more moments "
+                         "on, or press New moments.")
+    _, c, runs, cn, ln = max(found, key=lambda f: f[0])
+    if c["kd"] == 0 and c0["kd"] > 0:
+        cn.append("The song drops too early for a shot before it, so the edit starts right on the drop."
+                  if not c0["cap_before"] else
+                  "To fill the length with these moments, the edit starts right on the drop.")
+    if c["want"] < want0 and c["want"] < c0["want"]:
+        cn.append(f"Only {len(runs)} moment{'s' if len(runs) != 1 else ''} could play, and in "
+                  f"{_a(st['name'], low=True)} edit each one plays {window_text(style)} — so the edit is "
+                  f"{c['want'] * period:.0f} s instead of {want0 * period:.0f} s. Switch more moments on or press "
+                  "New moments for a full-length one.")
+    notes.extend(cn)
+    left.extend(ln)
+    return c, runs
 
 
 def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, analysis: Dict[str, Any],
                    fx: Dict[str, bool], durations: Dict[str, float], notes: List[str], pace: int = 0,
-                   flashes: str = "normal", song_start: Optional[float] = None) -> Dict[str, Any]:
+                   flashes: str = "normal", song_start: Optional[float] = None,
+                   budget: Optional[Dict[str, float]] = None,
+                   left: Optional[List[Tuple[Dict[str, Any], str]]] = None) -> Dict[str, Any]:
     st = STYLES[style]
-    c = _beat_cuts(style, length, analysis, notes, pace, song_start)
+    c, runs = _beat_plan(ordered, style, length, analysis, fx, notes, left if left is not None else [], pace,
+                         song_start, budget)
     grid, period, start_i, want, kd, s0 = c["grid"], c["period"], c["start_i"], c["want"], c["kd"], c["s0"]
     slots, ds = c["slots"], c["ds"]
     drop_i = start_i + kd
 
     def is_bar(i: int) -> bool:
         return (i - c["phase"]) % 4 == 0
-
-    drop_m = next((m for m in ordered if m.get("drop")), ordered[len(ordered) // 2])
-    di = ordered.index(drop_m)
-    before, after_m = ordered[:di], ordered[di + 1:]
-    if len(before) > ds >= 1:                                # more than fits before the drop: they play after it
-        after_m = before[ds:] + after_m
-        before = before[:ds]
-    if ds > 0 and not before:
-        before = [after_m.pop(0)] if len(after_m) > 1 else [drop_m]
-    if len(slots) - ds - 1 > 0 and not after_m:
-        after_m = [before.pop()] if len(before) > 1 else [drop_m]
-    runs = _spread(before, ds, notes) + [(drop_m, 1)] + _spread(after_m, len(slots) - ds - 1, notes)
 
     segments: List[Dict[str, Any]] = []
     j = 0
@@ -987,26 +1634,13 @@ def _beat_timeline(ordered: List[Dict[str, Any]], style: str, length: float, ana
                       "drop_at": round(grid[start_i + kd] - s0, 4), "fade_out": 0.0}}
 
 
-def _speech_timeline(ordered: List[Dict[str, Any]], style: str, length: float, analysis: Optional[Dict[str, Any]],
+def _speech_timeline(chosen: List[Dict[str, Any]], style: str, analysis: Optional[Dict[str, Any]],
                      fx: Dict[str, bool], durations: Dict[str, float], notes: List[str],
                      flashes: str = "normal", song_start: Optional[float] = None) -> Dict[str, Any]:
+    """Voice edits: each moment (already cut to length — see _fit_speech) plays whole at 1×, in order;
+    with a song, its drop meets the drop moment's hit and every cut waits for the next beat."""
     st = STYLES[style]
-    drop_m = next((m for m in ordered if m.get("drop")), None)
-    # whole moments, in order, as many as fit (the drop moment always plays)
-    budget = length * 1.15
-    chosen, total = [], (drop_m["end"] - drop_m["start"]) if drop_m else 0.0
-    for m in ordered:
-        if m is drop_m:
-            chosen.append(m)
-            continue
-        span = m["end"] - m["start"]
-        if chosen and total + span > budget:
-            notes.append(f"Left out “{(m.get('text') or 'a moment')[:40]}” to keep the edit near {length:.0f} s.")
-            continue
-        chosen.append(m)
-        total += span
-    if drop_m is None:
-        drop_m = chosen[len(chosen) // 2]
+    drop_m = next((m for m in chosen if m.get("drop")), None) or chosen[len(chosen) // 2]
 
     def text_for(m: Dict[str, Any]) -> Tuple[str, str]:
         if not fx.get("text"):
@@ -1115,14 +1749,57 @@ def _words_for(seg: Dict[str, Any], words: List[Dict[str, Any]]) -> List[Dict[st
     return out
 
 
+def _fit_speech(usable: List[Dict[str, Any]], preps: List[Dict[str, Any]], style: str, budget: Dict[str, float],
+                analysis: Optional[Dict[str, Any]], fx: Dict[str, bool], durations: Dict[str, float],
+                flashes: str, song_start: Optional[float], notes: List[str],
+                left: List[Tuple[Dict[str, Any], str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Voice edits: every moment's length chosen together (fit_budget) so the finished edit — with the
+    beat holds a song adds — lands within ±15 % of the length asked; tried again with the real holds."""
+    period = beat_grid(analysis)["period"] if analysis else 0.0
+    over = (len(usable) + 1) * period * 0.5 + 0.6 if analysis else 0.35
+    lower, upper, L = budget["lower"], budget["upper"], budget["length"]
+    best = None
+    slack = 0.02 * len(usable)                                 # cut edges are rounded to the hundredth, outwards
+    for _ in range(5):
+        picks, _spoken = fit_budget(preps, usable, budget["target"] - over, max(0.0, lower - over),
+                                    upper - over - slack)
+        chosen = [cut_moment(m, p, pk[0], pk[1]) for m, p, pk in zip(usable, preps, picks) if pk]
+        tn: List[str] = []
+        built = _speech_timeline(chosen, style, analysis, fx, durations, tn, flashes, song_start)
+        total = built["length"]
+        miss = 0.0 if lower - 1e-6 <= total <= upper + 1e-6 else min(abs(total - lower), abs(total - upper))
+        if best is None or miss < best[0]:
+            best = (miss, built, chosen, picks, tn)
+        if not miss:
+            break
+        over = total - sum(m["end"] - m["start"] for m in chosen)       # the holds this layout really has
+    _, built, chosen, picks, tn = best
+    notes.extend(tn)
+    for m, pk in zip(usable, picks):
+        if pk is None:
+            left.append((m, f"to keep the edit near {L:.0f} s"))
+    total = built["length"]
+    if total < lower - 1e-6:
+        notes.append(f"The moments only make {total:.0f} s — less than the {L:.0f} s asked, even with each one as "
+                     f"long as {_a(STYLES[style]['name'], low=True)} moment can be ({window_text(style)}). Switch "
+                     "more moments on or press New moments for a full-length edit.")
+    elif total > upper + 1e-6:
+        notes.append(f"The moments you sized by hand need {total:.0f} s — more than this {L:.0f} s edit allows. "
+                     "Shorten one of them or make the edit longer.")
+    return built, chosen
+
+
 def build_timeline(moments: List[Dict[str, Any]], style: str, length: float,
                    sound: Optional[Dict[str, Any]], effects: Optional[Dict[str, Any]],
                    words_by_source: Dict[str, List[Dict[str, Any]]],
                    voice_level: Optional[float] = None, music_level: Optional[float] = None,
                    durations: Optional[Dict[str, float]] = None, grade: Optional[str] = None,
                    hook: str = "", pace: Any = 0, flashes: str = "normal",
-                   song_start: Optional[float] = None) -> Dict[str, Any]:
-    """Where every moment sits in the edit: cut on the beat, the best one on the drop, ending on a bar line."""
+                   song_start: Optional[float] = None, limits: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Where every moment sits in the edit: each cut to its style's window on word boundaries, the
+    whole within ±15 % of the length asked (and inside a campaign's `limits` {min, max, name}), cut on
+    the beat, the best one on the drop, ending on a bar line. Pure: the words come in, nothing is read.
+    The result's `moments` says how each moment was cut, `left_out` which ones didn't fit and why."""
     style = style_key(style)
     st = STYLES[style]
     fx = {**st["effects"], **{k: bool(v) for k, v in (effects or {}).items() if k in EFFECTS}}
@@ -1139,14 +1816,35 @@ def build_timeline(moments: List[Dict[str, Any]], style: str, length: float,
     pace = PACES.get(pace, pace) if isinstance(pace, str) else int(pace or 0)
     pace = max(-1, min(1, pace))
     flashes = flashes if flashes in FLASHES else "normal"
+    if st["pace"] == "beat" and (not analysis or not analysis.get("beats")):
+        raise ValueError(f"{_a(st['name'])} edit is cut to music — pick a song first")
+    budget = length_budget(float(length), limits, notes)
+    # every moment cut to the style's window, on word boundaries, around its punchline
+    srcs = {sid: word_source(words_by_source.get(sid) or []) for sid in {m["source"] for m in ordered}}
+    left: List[Tuple[Dict[str, Any], str]] = []
+    usable, preps = [], []
+    for m in ordered:
+        prep = prepare_moment(m, style, srcs[m["source"]], float(durations.get(m["source"]) or 1e9))
+        if prep["opts"]:
+            usable.append(m)
+            preps.append(prep)
+        else:
+            left.append((m, prep["why"]))
+    if not usable:
+        raise ValueError(f"None of the moments can be cut cleanly to {_a(st['name'], low=True)} moment's length "
+                         f"({window_text(style)}) — press New moments to pick again.")
+    if not any(m.get("drop") for m in usable):
+        lead = max(usable, key=lambda m: highlights._num(m.get("strength"), 5.0))
+        for m in usable:
+            m["drop"] = m is lead
+        notes.append(f"The drop moment couldn't be cut cleanly, so {_label(lead)} is on the drop now.")
     if st["pace"] == "beat":
-        if not analysis or not analysis.get("beats"):
-            raise ValueError(f"{_a(st['name'])} edit is cut to music — pick a song first")
-        built = _beat_timeline(ordered, style, float(length), analysis, fx, durations, notes, pace, flashes,
-                               song_start)
+        fitted = [cut_moment(m, p) for m, p in zip(usable, preps)]
+        built = _beat_timeline(fitted, style, budget["length"], analysis, fx, durations, notes, pace, flashes,
+                               song_start, budget, left)
     else:
-        built = _speech_timeline(ordered, style, float(length), analysis if analysis and analysis.get("beats")
-                                 else None, fx, durations, notes, flashes, song_start)
+        built, fitted = _fit_speech(usable, preps, style, budget, analysis if analysis and analysis.get("beats")
+                                    else None, fx, durations, flashes, song_start, notes, left)
     segments = built["segments"]
     motion = {m["id"]: m.get("motion") for m in ordered}
     for i, seg in enumerate(segments):
@@ -1156,6 +1854,28 @@ def build_timeline(moments: List[Dict[str, Any]], style: str, length: float,
             vec = motionmatch.blur_vector(motion.get(segments[i - 1]["moment"]), motion.get(seg["moment"]))
             if vec:
                 seg["blur_vec"] = vec
+    # how each moment ended up, in plain words where it matters
+    shown: Dict[str, float] = {}
+    for seg in segments:
+        shown[seg["moment"]] = shown.get(seg["moment"], 0.0) + seg["dur"]
+    played = [{"id": m["id"], "source": m["source"], "start": m["start"], "end": m["end"], "hit": m["hit"],
+               "pick": m.get("pick"),
+               "shown": round(shown[m["id"]], 2), "manual": bool(m.get("manual"))}
+              for m in fitted if m["id"] in shown]
+    lo, hi = st["window"]
+    cut_down = sum(1 for m in fitted if m["id"] in shown and not m.get("manual") and m.get("pick")
+                   and m["pick"][1] - m["pick"][0] - (m["end"] - m["start"]) > 1.0)
+    if cut_down:
+        notes.insert(0, f"Cut {cut_down} long moment{'s' if cut_down > 1 else ''} down to the punchline — "
+                        f"{_a(st['name'], low=True)} moment plays {window_text(style)}.")
+    for m in fitted:
+        d = m["end"] - m["start"]
+        if m.get("manual") and m["id"] in shown and not lo - 0.05 <= d <= hi + 0.05:
+            notes.append(f"{_label(m)[0].upper() + _label(m)[1:]} plays {d:.1f} s — "
+                         f"{'longer' if d > hi else 'shorter'} than {_a(st['name'], low=True)} moment usually "
+                         f"does ({window_text(style)}), because you asked for it.")
+    for m, why in left:
+        notes.append(f"Left out {_label(m)} — {why}.")
     total = round(built["length"], 4)
     vl = st["voice"] if voice_level is None else max(0.0, min(1.5, float(voice_level)))
     ml = st["music"] if music_level is None else max(0.0, min(1.5, float(music_level)))
@@ -1170,7 +1890,9 @@ def build_timeline(moments: List[Dict[str, Any]], style: str, length: float,
         "loop": LOOP_SECONDS if fx.get("loop") and total > 3 else 0.0,
         "cuts": [s["at"] for s in segments],
         "drop_at": None if built.get("drop_at") is None else round(built["drop_at"], 4),
-        "notes": notes,
+        "notes": notes, "moments": played,
+        "left_out": [{"id": m["id"], "why": why} for m, why in left],
+        "budget": {k: round(v, 2) for k, v in budget.items()}, "window": [lo, hi],
     }
 
 
@@ -1338,9 +2060,10 @@ def plan_edit(eid: str, repick: bool) -> Dict[str, Any]:
     sound = store.get_sound(s.get("sound") or "") if s.get("sound") else None
     if repick or not plan.get("moments"):
         _stage(eid, "Picking the moments", 8)
+        look_for = [str(x) for x in (rules or {}).get("look_for") or [] if str(x).strip()]
         picked = pick_moments(sources, s["style"], s.get("theme", ""), s["length"],
-                              campaign.picker_guidance(rules) if rules else "", plan.get("candidates"), sound)
-        snap_moments(picked["moments"], s["style"], words)
+                              campaign.picker_guidance(rules) if rules else "", plan.get("candidates"), sound,
+                              look_for)
         plan.update({"moments": picked["moments"], "title": picked["title"], "hook": picked["hook"],
                      "pick_notes": picked["notes"], "post": _post(rules, picked["caption"], picked["hashtags"])})
         if s["style"] == "flow":
@@ -1368,11 +2091,44 @@ def plan_edit(eid: str, repick: bool) -> Dict[str, Any]:
     timeline = build_timeline(plan["moments"], s["style"], s["length"], sound, fx, words,
                               s.get("voice"), s.get("music"), durations_for(s["sources"]), s.get("grade"),
                               plan.get("hook", ""), s.get("pace", "normal"), s.get("flashes", "normal"),
-                              s.get("song_start"))
+                              s.get("song_start"), length_limits(rules))
     timeline["notes"] = fit_notes + timeline["notes"]
     plan["timeline"] = timeline
+    plan["moments"] = keep_cuts(plan["moments"], timeline)
     store.update_edit(eid, plan=plan)
     return plan
+
+
+def length_limits(rules: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A campaign's own shortest / longest (from its brief), for the length budget."""
+    if not rules:
+        return None
+    from . import campaign
+    r = campaign.resolve(rules)
+    return {"min": r.get("min_len"), "max": r.get("max_len"), "name": r.get("name") or "The campaign"}
+
+
+def keep_cuts(moments: List[Dict[str, Any]], timeline: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Store how each moment was cut (what plays, how long it's on screen, or why it was left out),
+    keeping what it was cut from (`pick`) so a later re-make — another length, another style — cuts
+    it again from the whole of it."""
+    played = {x["id"]: x for x in timeline.get("moments") or []}
+    left = {x["id"]: x["why"] for x in timeline.get("left_out") or []}
+    out = []
+    for m in moments:
+        m = dict(m)
+        m.setdefault("pick", [m["start"], m["end"], m.get("hit")])
+        m.pop("shown", None)
+        m.pop("left_out", None)
+        if m["id"] in played:
+            x = played[m["id"]]
+            m.update(start=x["start"], end=x["end"], hit=x["hit"], shown=x["shown"])
+            if x.get("pick"):
+                m["pick"] = x["pick"]
+        elif m["id"] in left and not m.get("off"):
+            m["left_out"] = left[m["id"]]
+        out.append(m)
+    return out
 
 
 def match_motion(eid: str, moments: List[Dict[str, Any]], sources: List[Dict[str, Any]],
@@ -1491,10 +2247,156 @@ def undo(eid: str) -> Dict[str, Any]:
     return store.get_edit(eid)
 
 
-def remake(eid: str, changes: Dict[str, Any]) -> None:
+RESIZE_KEYS = ("size", "steps", "seconds", "trim_start", "trim_end", "start_words", "end_words")
+
+
+def _snap_start(src: Dict[str, Any], t: float, voice: bool) -> Optional[float]:
+    """The clean place to start nearest second t: a sentence start or a breath if one is close,
+    else the next word's start — never inside a word. None when t is past all the words."""
+    ws, starts = src["ws"], src["starts"]
+    if not ws:
+        return t
+    k = bisect.bisect_left(starts, t - 0.15)
+    near = [i for i in range(max(0, k - 3), min(len(ws), k + 4))]
+    if not near or k >= len(ws) and t > ws[-1]["end"]:
+        return max(t, ws[-1]["end"] + 0.02) if ws else t
+    costs = (0.0, 1.2, 4.0) if voice else (0.0, 0.3, 0.6)
+    i = min(near, key=lambda i: costs[src["sq"][i]] + 3.0 * abs(ws[i]["start"] - t))   # his amount counts most
+    return _start_range(ws, i)[1]
+
+
+def _snap_end(src: Dict[str, Any], t: float, voice: bool, src_dur: float) -> float:
+    """The clean place to end nearest second t: right after a sentence or a breath if one is close,
+    else right after the last word before it — never inside a word."""
+    ws, starts = src["ws"], src["starts"]
+    if not ws:
+        return t
+    k = bisect.bisect_right(starts, t + 0.15) - 1
+    near = [j for j in range(max(0, k - 3), min(len(ws), k + 4))]
+    if not near or k < 0:
+        return min(t, ws[0]["start"] - 0.02) if ws else t
+    costs = (0.0, 1.2, 4.0) if voice else (0.0, 0.3, 0.6)
+    j = min(near, key=lambda j: costs[src["eq"][j]] + 3.0 * abs(ws[j]["end"] - t))
+    return _end_range(ws, j, src_dur)[0]
+
+
+def resize_moment(m: Dict[str, Any], change: Dict[str, Any], style: str, words: List[Dict[str, Any]],
+                  src_dur: float = 1e9) -> Tuple[Optional[Dict[str, Any]], str]:
+    """One moment made shorter, longer or trimmed, as gs asked — by hand ("Shorter" / "Longer") or in
+    words ("cut the first 2 seconds", "end it right after he says 'let's go'"). Cuts land on word
+    boundaries, a voice style keeps whole sentences where it can, and the punchline stays in.
+    His size then wins over the style's window (the edit's total length still holds).
+    Returns (the moment, a plain note) — or (None, why it couldn't be done)."""
+    style = style_key(style)
+    st = STYLES[style]
+    lo, hi = st["window"]
+    src = word_source(words)
+    voice = st["pace"] == "speech"
+    s, e = float(m["start"]), float(m["end"])
+    hit = min(max(float(m.get("hit") if m.get("hit") is not None else (s + e) / 2), s), e)
+    d = e - s
+    name = _label(m)
+    ns, ne = s, e
+    told = []
+    if str(change.get("start_words") or "").strip():
+        found = find_words(src, str(change["start_words"]), s, e, reach=20.0, fuzzy=True)
+        if not found:
+            return None, f"Couldn't find “{change['start_words']}” near {name}, so it stays as it was."
+        ns = _start_range(src["ws"], found[0])[1]
+        told.append(f"starts on “{change['start_words']}”")
+    elif change.get("trim_start") not in (None, ""):
+        ns = _snap_start(src, s + highlights._num(change["trim_start"], 0.0), voice)
+    if str(change.get("end_words") or "").strip():
+        found = find_words(src, str(change["end_words"]), s, e, reach=20.0, fuzzy=True)
+        if not found:
+            return None, f"Couldn't find “{change['end_words']}” near {name}, so it stays as it was."
+        ne = _end_range(src["ws"], found[1], src_dur)[0]
+        told.append(f"ends right after “{change['end_words']}”")
+    elif change.get("trim_end") not in (None, ""):
+        ne = _snap_end(src, e - highlights._num(change["trim_end"], 0.0), voice, src_dur)
+    target = None
+    if change.get("seconds") not in (None, ""):
+        target = max(MIN_MOMENT, highlights._num(change["seconds"], d))
+    else:
+        steps = highlights._int(change.get("steps"), 0)
+        if change.get("size") in ("shorter", "longer") and not steps:
+            steps = -1 if change["size"] == "shorter" else 1
+        if steps:
+            target = d
+            for _ in range(min(5, abs(steps))):
+                target = target + (1 if steps > 0 else -1) * max(1.0, 0.3 * target)
+            target = max(MIN_MOMENT, target)
+    if target is not None and (ns, ne) == (s, e):
+        costs = _edge_costs(style)
+        sub = dict(m, hit=hit)
+        p, line = _punchline(sub, src, style, s, e, hit) if src["ws"] else (None, None)
+        if target < d - 0.05:                                 # shorter: cut inside it, keeping the punchline
+            cuts = (_cuts(src, a=s, b=e, p=p, line=line, lo=MIN_MOMENT, hi=d - 0.3, costs=costs, bounds=(s, e),
+                          src_dur=src_dur) if p is not None else _silent_cut(src, s, e, hit, (s, e), src_dur))
+            opts = _options(cuts, MIN_MOMENT, max(MIN_MOMENT, d - 0.3), target)
+        else:                                                 # longer: more before and after it
+            grow = target - d + 2.0
+            bounds = (max(0.0, s - grow), min(src_dur, e + grow))
+            cuts = (_cuts(src, a=s, b=e, p=p, line=line, lo=d + 0.3, hi=target + 1.5, costs=costs, bounds=bounds,
+                          src_dur=src_dur, contain=(s, e)) if p is not None
+                    else _silent_cut(src, s, e, hit, bounds, src_dur))
+            opts = _options(cuts, d + 0.3, target + 1.5, target)
+        if not opts:
+            return None, (f"There's no clean way to make {name} {'shorter' if target < d else 'longer'} without "
+                          "cutting into his words, so it stays as it was.")
+        u, _, idx = min(opts, key=lambda o: o[1] + 0.6 * abs(o[0] * UNIT - target))
+        ns, ne = _realize(cuts[idx], u * UNIT)
+    ns, ne = max(0.0, math.floor(ns * 100 + 1e-6) / 100), min(src_dur, math.ceil(ne * 100 - 1e-6) / 100)
+    if ne - ns < MIN_MOMENT:
+        return None, f"That would leave less than a second of {name}, so it stays as it was."
+    if abs(ns - s) < 0.02 and abs(ne - e) < 0.02:
+        return None, f"{name[0].upper() + name[1:]} is already cut there, so it stays as it was."
+    new_hit = min(max(hit, ns), ne - 0.1 if ne - ns > 0.3 else ne)
+    out = dict(m, start=round(ns, 2), end=round(ne, 2), hit=round(new_hit, 2), manual=True,
+               pick=[round(ns, 2), round(ne, 2), round(new_hit, 2)])
+    out.pop("left_out", None)
+    nd = ne - ns
+    note = f"{name[0].upper() + name[1:]}: {nd:.1f} s now (was {d:.1f} s)" + (f", {' and '.join(told)}" if told else "")
+    if nd > hi + 0.05 or nd < lo - 0.05:
+        note += (f" — {'longer' if nd > hi else 'shorter'} than {_a(st['name'], low=True)} moment usually is "
+                 f"({window_text(style)}), because you asked for it")
+    return out, note + "."
+
+
+def apply_resizes(moments: List[Dict[str, Any]], asks: List[Dict[str, Any]], style: str,
+                  words_by_source: Dict[str, List[Dict[str, Any]]],
+                  durations: Dict[str, float]) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
+    """Every size change asked for, applied in turn: (the moments, what was done, what couldn't be)."""
+    by_id = {m["id"]: i for i, m in enumerate(moments)}
+    out = [dict(m) for m in moments]
+    done, cant = [], []
+    for ask_ in asks:
+        ask_ = toolio.as_dict(ask_)
+        i = by_id.get(str(ask_.get("id") or ""))
+        if i is None:
+            cant.append("One of the moments asked about isn't in this edit any more.")
+            continue
+        if not any(ask_.get(k) not in (None, "", 0) for k in RESIZE_KEYS):
+            continue
+        m = out[i]
+        new, note = resize_moment(m, ask_, style, words_by_source.get(m["source"]) or [],
+                                  float(durations.get(m["source"]) or 1e9))
+        if new is None:
+            cant.append(note)
+        else:
+            if new.get("off"):
+                new["off"] = False
+            out[i] = new
+            done.append(note)
+    return out, done, cant
+
+
+def remake(eid: str, changes: Dict[str, Any]) -> Dict[str, List[str]]:
     """Apply changes from the edit page (style, song, effects, levels, pace, order,
-    moments off or on, new text) and render again — Claude only when asked
-    for new moments. The current version is kept for Undo."""
+    moments off or on, new text, a moment shorter / longer / trimmed — `resize`:
+    [{id, size|steps|seconds|trim_start|trim_end|start_words|end_words}]) and render
+    again — Claude only when asked for new moments. The current version is kept for
+    Undo. Returns what the size changes did and couldn't do, in plain words."""
     edit = store.get_edit(eid)
     if not edit:
         raise ValueError("Edit not found")
@@ -1555,6 +2457,18 @@ def remake(eid: str, changes: Dict[str, Any]) -> None:
                 for m in new:
                     m["drop"] = m is first
             plan["moments"] = new
+    sized: Dict[str, List[str]] = {"done": [], "cant": []}
+    plan.pop("resize_notes", None)
+    if isinstance(changes.get("resize"), list) and changes["resize"]:
+        cur = plan.get("moments") or []
+        new, sized["done"], sized["cant"] = apply_resizes(cur, changes["resize"], checked["style"],
+                                                          words_for_sources([m["source"] for m in cur]),
+                                                          durations_for(checked["sources"]))
+        others = [k for k, v in changes.items() if k not in ("resize", "_ask") and v not in (None, "", [], {})]
+        if not sized["done"] and not others:
+            raise ValueError(" ".join(sized["cant"]) or "Nothing to change — say which moment and how")
+        plan["moments"] = new
+        plan["resize_notes"] = sized["done"] + sized["cant"]
     repick = bool(changes.get("repick")) or checked["sources"] != edit["settings"].get("sources")
     if not repick and checked["style"] != edit["settings"].get("style") and \
             STYLES[checked["style"]]["pace"] != STYLES[style_key(edit["settings"].get("style"))]["pace"]:
@@ -1568,6 +2482,7 @@ def remake(eid: str, changes: Dict[str, Any]) -> None:
     if plan.get("post") and not repick:
         store.update_edit(eid, caption=plan["post"].get("caption", ""), hashtags=plan["post"].get("hashtags", []))
     threading.Thread(target=run, args=(eid, repick), daemon=True).start()
+    return sized
 
 
 def versions(eid: str, sound_ids: List[str]) -> List[str]:
@@ -1687,6 +2602,22 @@ ASK_TOOL = {
                             "id": {"type": "string"}, "text": {"type": "string"}, "off": {"type": "boolean"},
                             "drop": {"type": "boolean", "description": "true for the ONE moment on the drop."}},
                             "required": ["id"]}},
+            "resize": {"type": "array", "description": "Moments to make shorter, longer or trim — only the ones "
+                       "that change (the order stays). ClipAgent cuts on whole words and keeps the punchline.",
+                       "items": {"type": "object", "properties": {
+                           "id": {"type": "string", "description": "The moment's id (m1, m2…), from the list."},
+                           "size": {"type": "string", "enum": ["shorter", "longer"],
+                                    "description": "A step shorter or longer (about a third) when no amount is said."},
+                           "seconds": {"type": "number", "description": "Make it about this many seconds long."},
+                           "trim_start": {"type": "number", "description": "Seconds to cut off its start "
+                                          "(negative = start that much earlier)."},
+                           "trim_end": {"type": "number", "description": "Seconds to cut off its end "
+                                        "(negative = let it run that much longer)."},
+                           "start_words": {"type": "string", "description": "Start right on these words, as he "
+                                           "says them in or near that moment."},
+                           "end_words": {"type": "string", "description": "End right after these words, as he says "
+                                         "them (e.g. \"let's go\")."}},
+                           "required": ["id"]}},
             "repick": {"type": "boolean", "description": "true only when they want different moments that aren't in "
                        "the list (Claude picks again from the videos)."},
             "theme": {"type": "string", "description": "With repick: what the new moments should be about."},
@@ -1707,6 +2638,13 @@ Rules:
 - "Put the line about X on the drop" → find the moment whose words say it and send ALL moments with drop on that \
 one. If none of the moments says it, set repick with a theme naming it.
 - "Different song" → song, by the exact name of one of their songs; if they name none, pick a different one.
+- A moment shorter / longer / trimmed → resize, with that moment's id. Moments are numbered in playing order: \
+"the second moment" is number 2, "the last one" the last. Match "the funny one", "the 2 million line" by what's \
+said in it. "Shorter" / "longer" with no amount → size; "make it 4 seconds" → seconds; "cut the first 2 seconds" → \
+trim_start 2; "end it sooner" → trim_end; "let it run 2 seconds longer" → trim_end -2; "end right after he says \
+X" → end_words X; "start when he says X" → start_words X. Their request may go past the style's usual moment \
+length — that's fine (the whole edit still keeps its length).
+- "Make the whole thing N seconds" / "shorter overall" → length (the nearest allowed).
 - Words on screen: only what he says (numbers too) — never invent.
 - Things the controls can't do (download a song, add stickers, sound effects, other people's footage, post it for \
 them) go in cant, with the closest thing you can do. Never pretend.
@@ -1731,12 +2669,16 @@ def _ask_prompt(edit: Dict[str, Any]) -> str:
              "Effects on: " + (", ".join(k for k, v in fx.items() if v) or "none"),
              f"Voice level {tl.get('voice', 0)} · music level {(tl.get('music') or {}).get('level', 0)}",
              f"Hook: {plan.get('hook') or '(none)'}",
-             "Moments, in playing order:"]
-    for m in plan.get("moments") or []:
+             f"Edit length now: {tl.get('length') or s['length']:.0f} s · a {STYLES[s['style']]['name']} moment "
+             f"usually plays {window_text(s['style'])}",
+             "Moments, in playing order (number. id):"]
+    for n, m in enumerate(plan.get("moments") or [], 1):
         said = _said_between(words.get(m["source"]) or [], m["start"], m["end"])[:260]
-        lines.append(f"  {m['id']}{' [DROP]' if m.get('drop') else ''}{' [off]' if m.get('off') else ''} — "
-                     f"{titles.get(m['source'], '')[:40]} {m['start']:.1f}-{m['end']:.1f}s · on screen: "
-                     f"“{m.get('text') or ''}” · he says: “{said}”")
+        state = (" [DROP]" if m.get("drop") else "") + (" [off]" if m.get("off") else "") + \
+            (" [left out: " + str(m["left_out"])[:60] + "]" if m.get("left_out") else "") + \
+            (" [sized by hand]" if m.get("manual") else "")
+        lines.append(f"  {n}. {m['id']}{state} — {titles.get(m['source'], '')[:40]} {m['start']:.1f}-{m['end']:.1f}s "
+                     f"({m['end'] - m['start']:.1f} s) · on screen: “{m.get('text') or ''}” · he says: “{said}”")
     return "\n".join(lines)
 
 
@@ -1784,8 +2726,9 @@ def ask(eid: str, text: str) -> Dict[str, Any]:
                     changes["sound"] = match["id"]
                 else:
                     reply["cant"].append(f"There's no song called “{r['song']}” in your songs — add it first.")
-        if r.get("length") in LENGTHS:
-            changes["length"] = int(r["length"])
+        asked_len = highlights._num(r.get("length"), 0.0)
+        if asked_len > 0:
+            changes["length"] = min(LENGTHS, key=lambda x: abs(x - asked_len))
         for key, allowed in (("pace", PACES), ("flashes", FLASHES), ("grade", GRADES)):
             if r.get(key) in allowed:
                 changes[key] = r[key]
@@ -1808,10 +2751,31 @@ def ask(eid: str, text: str) -> Dict[str, Any]:
         moments = toolio.coerce(r.get("moments"))
         if isinstance(moments, list) and moments:
             changes["moments"] = [toolio.as_dict(m) for m in moments if toolio.as_dict(m).get("id")]
+            ids = {m["id"] for m in edit["plan"]["moments"]}
+            sent = [m["id"] for m in changes["moments"]]
+            sized = [m for m in changes["moments"] if any(m.get(k) not in (None, "", 0) for k in RESIZE_KEYS)]
+            if sized:                                       # sizes sent with the order: treat them as resizes
+                changes["resize"] = sized
+            if len(set(sent) & ids) < len(ids) and not any(k in m for m in changes["moments"]
+                                                           for k in ("off", "drop", "text")):
+                changes.pop("moments")                      # only some moments, nothing but sizes: keep the order
+        resize = toolio.coerce(r.get("resize"))
+        if isinstance(resize, list) and resize:
+            changes["resize"] = (changes.get("resize") or []) + [toolio.as_dict(x) for x in resize
+                                                                 if toolio.as_dict(x).get("id")]
         if r.get("repick") is True:
             changes["repick"] = True
             if highlights._text(r.get("theme")):
                 changes["theme"] = highlights._text(r["theme"])
+    if changes.get("resize"):                               # what the size changes can do, said up front
+        style = changes.get("style") or edit["settings"]["style"]
+        cur = edit["plan"]["moments"]
+        _, done, cant_sz = apply_resizes(cur, changes["resize"], style, words_for_sources([m["source"] for m in cur]),
+                                         durations_for(edit["settings"]["sources"]))
+        reply["done"] = done
+        reply["cant"] += [c for c in cant_sz if c not in reply["cant"]]
+        if not done:
+            changes.pop("resize")
     entry = {"text": text[:300], **reply, "changed": bool(changes), "at": time.time()}
     if changes:
         remake(eid, {**changes, "_ask": entry})        # saved with the plan before the re-make starts
@@ -1831,8 +2795,9 @@ def edit_json(e: Dict[str, Any]) -> Dict[str, Any]:
     st = STYLES[style]
     sound = store.get_sound(s.get("sound") or "") if s.get("sound") else None
     titles = {j: (store.get_job(j) or {}).get("title") or "" for j in s.get("sources") or []}
-    moments = [{**{k: v for k, v in m.items() if k != "motion"}, "source_title": titles.get(m["source"], ""),
-                "length": round(m["end"] - m["start"], 1),
+    moments = [{**{k: v for k, v in m.items() if k not in ("motion", "pick")},
+                "source_title": titles.get(m["source"], ""),
+                "length": round(m.get("shown") or (m["end"] - m["start"]), 1),
                 "thumb": f"/media/edit-moment/{e['id']}/{m['id']}.jpg"} for m in plan.get("moments") or []]
     post = plan.get("post") or {}
     return {
@@ -1848,7 +2813,8 @@ def edit_json(e: Dict[str, Any]) -> Dict[str, Any]:
         "music": (tl.get("music") or {}).get("level", s.get("music", st["music"])),
         "sound": sound_json(sound) if sound else None, "song_start": s.get("song_start"),
         "song_part": [(tl.get("music") or {}).get("start"), (tl.get("music") or {}).get("end")] if tl.get("music") else None,
-        "notes": (plan.get("pick_notes") or []) + (tl.get("notes") or []),
+        "notes": (plan.get("resize_notes") or []) + (plan.get("pick_notes") or []) + (tl.get("notes") or []),
+        "window": list(st["window"]),
         "caption": post.get("caption") or e.get("caption") or "", "hashtags": post.get("hashtags") or e.get("hashtags") or [],
         "post_text": post.get("text") or "", "checklist": post.get("checklist") or [],
         "compliance": e.get("compliance") or None, "can_undo": bool(e.get("undo")),
