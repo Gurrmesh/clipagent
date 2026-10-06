@@ -204,9 +204,11 @@ def delete(post_id: str) -> None:
 
 def fetch_stats(url: str) -> Optional[Dict[str, int]]:
     """The public view count of a post, read the way yt-dlp reads a page."""
+    from . import media
+    if media.youtube_paused(url):            # YouTube's robot check: leave YouTube alone until it lifts
+        return None
     try:
         import yt_dlp
-        from . import media
         opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True,
                 "extract_flat": False, **media.ytdlp_auth()}
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -218,7 +220,8 @@ def fetch_stats(url: str) -> Optional[Dict[str, int]]:
             return None
         return {"views": int(views), "likes": int(info.get("like_count") or 0),
                 "comments": int(info.get("comment_count") or 0)}
-    except Exception:
+    except Exception as exc:
+        media.noticed_bot_check(str(exc), url)    # the robot check pauses YouTube downloads too
         return None
 
 
@@ -442,9 +445,11 @@ def unwatch_channel(url: str) -> Dict[str, Any]:
 
 
 def _latest(channel_url: str, n: int = 6) -> List[Dict[str, Any]]:
+    from . import media
+    if media.youtube_paused(channel_url):    # YouTube's robot check: leave YouTube alone until it lifts
+        return []
     try:
         import yt_dlp
-        from . import media
         target = channel_url if re.search(r"/(videos|shorts|streams)$", channel_url) else channel_url + "/videos"
         opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "playlistend": n,
                 **media.ytdlp_auth()}
@@ -452,7 +457,8 @@ def _latest(channel_url: str, n: int = 6) -> List[Dict[str, Any]]:
             info = ydl.extract_info(target, download=False)
         return [{"id": e.get("id"), "title": e.get("title") or "", "url": e.get("url") or e.get("webpage_url") or "",
                  "duration": e.get("duration")} for e in (info or {}).get("entries") or [] if e and e.get("id")]
-    except Exception:
+    except Exception as exc:
+        media.noticed_bot_check(str(exc), channel_url)    # the robot check pauses YouTube downloads too
         return []
 
 

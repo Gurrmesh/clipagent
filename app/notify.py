@@ -115,6 +115,23 @@ def problem(job_id: str, kind: str, text: str) -> None:
     send(text)
 
 
+def download_pause(paused: bool, waiting: int = 0) -> None:
+    """The one message when YouTube downloads pause (not one per link), and the one when they work
+    again. downloads.py decides when; the "already said it" flag lives on disk, so a restart
+    doesn't repeat it."""
+    if paused:
+        send("⏸ <b>YouTube downloads are paused.</b> YouTube is asking this PC to prove it's not a robot, "
+             "so I've stopped asking it for videos. Your links are saved and run when it lets up. Twitch, "
+             "Kick and TikTok links and uploaded files keep going.\n\n"
+             "What helps: wait an hour or two; or set up a cookies file from a spare account (ClipAgent → "
+             "Settings shows how); or upload the video file instead.\n"
+             "I'll try one link again by myself in about 45 min. Send /resume to try now.")
+    else:
+        rest = (f" Carrying on with the {waiting} saved link{'s' if waiting != 1 else ''}, one after another."
+                if waiting else "")
+        send(f"▶️ <b>YouTube downloads are working again.</b>{rest}")
+
+
 def _small_copy(path: Path, duration: float) -> Optional[Path]:
     """A copy under Telegram's 50 MB limit, for clips that are bigger."""
     if duration <= 0:
@@ -305,7 +322,7 @@ def job_finished(job_id: str) -> None:
     try:
         from . import store                                 # late: store imports config only
         job = store.get_job(job_id)
-        if not job:
+        if not job or job.get("status") in ("queued", "running"):    # not finished: waiting, or still going
             return
         title = esc((job.get("title") or "Your video")[:120])
         if job.get("status") == "failed":

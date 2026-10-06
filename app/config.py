@@ -31,6 +31,9 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 # --- Limits ---------------------------------------------------------------
 MAX_CLIPS = int(os.getenv("MAX_CLIPS", "12"))
 MAX_SOURCE_MINUTES = int(os.getenv("MAX_SOURCE_MINUTES", "240"))
+# A video longer than that (a 6-hour Twitch VOD) isn't downloaded whole: ClipAgent listens to its
+# sound first and downloads only its liveliest parts — this many minutes of them at most.
+LONG_SOURCE_KEEP_MINUTES = int(os.getenv("LONG_SOURCE_KEEP_MINUTES", "60"))
 # Whisper uploads cap at 25 MB, so audio is chunked below that.
 AUDIO_CHUNK_SECONDS = int(os.getenv("AUDIO_CHUNK_SECONDS", "900"))
 

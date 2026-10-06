@@ -53,6 +53,7 @@
       <h1>Make clips</h1>
       <p class="lede">Paste a long video. ClipAgent finds the moments worth posting, styles each one, checks it, and hands you clips ready to upload.</p>
     </header>
+    <div class="dl-pause hidden" id="dlpause-make" role="status" aria-live="polite"></div>
 
     <div class="maker">
       <div class="step">
@@ -154,6 +155,7 @@
       <div><h1>My videos</h1><p class="lede">Everything you've clipped. Open one to download, edit or plan its clips.</p></div>
       <a href="#/make" class="btn">Make clips</a>
     </header>
+    <div class="dl-pause hidden" id="dlpause-videos" role="status" aria-live="polite"></div>
     <div class="filters" id="v-filters">
       <button type="button" class="chip on" data-f="all">All</button>
       <button type="button" class="chip" data-f="working">Working</button>
@@ -191,6 +193,7 @@
     <div class="strip-wrap hidden" id="strip-wrap">
       <div class="strip-head"><span>Where the clips come from</span><span id="strip-len" class="muted"></span></div>
       <div class="strip" id="strip"></div>
+      <p class="hint strip-note hidden" id="strip-note"></p>
     </div>
 
     <section class="ask hidden" id="ask" aria-labelledby="ask-title">
@@ -607,6 +610,11 @@
     <div class="card">
       <h2>Connections</h2>
       <div id="set-keys"></div>
+    </div>
+
+    <div class="card" id="set-youtube-card">
+      <h2>YouTube downloads</h2>
+      <div id="set-youtube"></div>
     </div>
   </section>
 </main>

@@ -9,8 +9,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import (brandlogo, notify, campaign, compliance, framing, highlights, judge, media, overlay, render, store,
-               structure, styles, tighten, transcribe)
+from . import (brandlogo, notify, campaign, compliance, downloads, framing, highlights, judge, media, overlay, render,
+               store, structure, styles, tighten, transcribe)
 from . import doctor
 
 
@@ -25,7 +25,7 @@ def _frame_rate(source: Path):
 
 def _seamless() -> bool:
     return render.ENGINE != "classic"
-from .config import ANTHROPIC_API_KEY, AUDIO_DIR, MAX_CLIPS
+from .config import ANTHROPIC_API_KEY, AUDIO_DIR, LONG_SOURCE_KEEP_MINUTES, MAX_CLIPS, MAX_SOURCE_MINUTES
 
 RENDER_WORKERS = int(os.getenv("RENDER_WORKERS", "3"))
 PER_CLIP_SAMPLES = 24          # face samples per clip when tracking a speaker
@@ -60,6 +60,45 @@ def source_fingerprint(path: Path) -> str:
         return digest.hexdigest()
     except OSError:
         return ""
+
+
+def _get_source(job_id: str, job: Dict[str, Any], url: Optional[str],
+                upload_path: Optional[Path]) -> Optional[Tuple[Path, str, Dict[str, Any]]]:
+    """Step 1: the video on disk, its title, and what the site said about it (jobs.source_meta).
+
+    None when it's a YouTube link and YouTube downloads are paused (the robot check): the job
+    waits in downloads.py instead of failing. A video longer than MAX_SOURCE_MINUTES (a 6-hour
+    Twitch VOD) gets only its best parts, joined into one source with their places noted."""
+    meta = store.source_meta(job)
+    if upload_path:
+        _stage(job_id, "Reading your file", 10)
+        source = Path(upload_path)
+        title = job.get("title") or source.stem
+        # an upload has no site and no upload date; a re-run keeps the first run's facts (and parts)
+        return source, title, meta or media.source_meta(None, title=title)
+    if media.youtube_paused(url or ""):
+        downloads.park(job_id, url or "")
+        return None
+    _stage(job_id, "Downloading video", 4)
+    try:
+        info = media.read_info(url)
+        meta = media.source_meta(info)
+        store.update_job(job_id, source_meta=json.dumps(meta), **({"title": meta["title"]} if meta["title"] else {}))
+        limit = MAX_SOURCE_MINUTES * 60
+        if meta["duration"] > limit:
+            source, sections, note = media.download_long(
+                url, job_id, info, limit_seconds=limit, keep_seconds=LONG_SOURCE_KEEP_MINUTES * 60,
+                progress=lambda f, text: _stage(job_id, text, 4 + int(f * 24)))
+            meta = {**meta, "sections": sections, "sections_note": note}
+            title = meta["title"] or "Untitled"
+        else:
+            source, title = media.download(
+                url, job_id, progress=lambda p: _stage(job_id, "Downloading video", 4 + p), info=info)
+    except media.BotBlocked as exc:
+        downloads.park(job_id, url, hit=exc.hit, raw=exc.raw)
+        return None
+    downloads.youtube_ok(url)
+    return source, title, meta
 
 
 # --- one clip -------------------------------------------------------------
@@ -212,6 +251,73 @@ def _fit_length(clip: Dict[str, Any], lo: Optional[float], hi: Optional[float], 
         clip["end"] = round(clip["start"] + hi - 0.2, 2)
 
 
+# A long stream arrives as its best parts joined end to end: hard cuts between unrelated moments.
+JOIN_NOTE = ("[JUMP: what follows is from a different part of the stream and has nothing to do with what came "
+             "just before. Never make a clip that runs across this line.]")
+
+
+def _pieces(meta: Dict[str, Any]) -> List[Tuple[float, float]]:
+    """Where each downloaded part sits in a joined source ([] for an ordinary video)."""
+    out = []
+    for s in meta.get("sections") or []:
+        try:
+            out.append((float(s["source_start"]), float(s["source_end"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out if len(out) > 1 else []
+
+
+def _with_joins(segments: List[Dict[str, Any]], pieces: List[Tuple[float, float]]) -> List[Dict[str, Any]]:
+    """The transcript with a marked line at every join, so Claude never picks across one."""
+    if not pieces:
+        return segments
+    marks = [{"text": JOIN_NOTE, "start": round(a, 2), "end": round(a, 2)} for a, _ in pieces[1:]]
+    return sorted(list(segments) + marks, key=lambda s: s["start"])
+
+
+def _inside_one_piece(start: float, end: float, pieces: List[Tuple[float, float]],
+                      lo: Optional[float] = None) -> Tuple[float, float]:
+    """Keep a span inside the part that holds most of it: what's across the join is unrelated.
+    If that leaves it too short, it grows away from the join, inside the same part."""
+    if not pieces:
+        return start, end
+    overlap = lambda p: min(end, p[1]) - max(start, p[0])         # noqa: E731
+    a, b = max(pieces, key=overlap)
+    if overlap((a, b)) <= 0:                                       # off the end: the nearest part
+        a, b = min(pieces, key=lambda p: min(abs(start - p[1]), abs(end - p[0])))
+    a, b = a + 0.05, b - 0.05                                      # never a frame of the next part
+    if start >= a and end <= b:
+        return start, end
+    need = min(end - start, max(float(lo or 0), highlights.MIN_LEN), b - a)
+    s, e = max(start, a), min(end, b)
+    if e - s < need:
+        e = min(b, s + need)
+        s = max(a, e - need)
+    return round(s, 2), round(e, 2)
+
+
+def _variants_inside_pieces(clips: List[Dict[str, Any]], pieces: List[Tuple[float, float]],
+                            lo: Optional[float] = None) -> None:
+    """After the structure pass: the straight version kept inside one part, and a stitched
+    version that borrows from another part of the stream dropped."""
+    if not pieces:
+        return
+    for clip in clips:
+        v = clip.get("variants") or {}
+        cont = v.get("continuous")
+        if cont:
+            s, e = _inside_one_piece(cont["start"], cont["end"], pieces, lo)
+            if (s, e) != (cont["start"], cont["end"]):
+                v["continuous"] = structure._as_variant(s, e, cont.get("hook", ""))
+        st = v.get("stitched")
+        if st:
+            homes = {next((n for n, (a, b) in enumerate(pieces) if a - 0.05 <= p["start"] and p["end"] <= b + 0.05),
+                          -1) for p in st.get("parts") or []}
+            if len(homes) != 1 or -1 in homes:
+                v["stitched"] = None
+                clip["stitch_problem"] = "its parts come from different parts of the stream"
+
+
 def _gate_source(rb: Dict[str, Any], clip_id: str) -> None:
     """Check a rendered clip-from-source campaign clip and store the verdict."""
     row = store.get_clip(clip_id)
@@ -304,7 +410,8 @@ def run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path] 
     try:
         _run_job(job_id, url, upload_path)
     finally:
-        notify.job_finished(job_id)
+        if not downloads.is_parked(job_id):        # a link waiting for YouTube isn't finished
+            notify.job_finished(job_id)
 
 
 def _run_overlay_job(job_id: str) -> None:
@@ -442,20 +549,18 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
 
     try:
         # 1. Get the video ---------------------------------------------------
-        if upload_path:
-            _stage(job_id, "Reading your file", 10)
-            source = Path(upload_path)
-            title = job.get("title") or source.stem
-        else:
-            _stage(job_id, "Downloading video", 4)
-            source, title = media.download(
-                url, job_id, progress=lambda p: _stage(job_id, "Downloading video", 4 + p)
-            )
+        got = _get_source(job_id, job, url, upload_path)
+        if got is None:
+            return                              # YouTube downloads are paused: the link waits, saved
+        source, title, meta = got
         info = media.probe(source)
+        if not meta.get("duration"):
+            meta["duration"] = round(info["duration"], 2)
+        pieces = _pieces(meta)                  # a long stream's parts: no clip may cross a join
         fps = _frame_rate(source)
         fingerprint = source_fingerprint(source)
         store.update_job(job_id, title=title, source_path=str(source),
-                         duration=info["duration"], source_hash=fingerprint)
+                         duration=info["duration"], source_hash=fingerprint, source_meta=json.dumps(meta))
 
         if not info["has_audio"]:
             raise RuntimeError("That video has no audio track, so there is nothing to transcribe.")
@@ -486,7 +591,7 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
         # 4. Claude picks the moments, then ranks them all together -----------
         _stage(job_id, "Claude is finding the moments", 62)
         clips = highlights.find_highlights(
-            title=title, segments=result["segments"], duration=info["duration"],
+            title=title, segments=_with_joins(result["segments"], pieces), duration=info["duration"],
             peaks=peaks, want=want,
             progress=lambda p: _stage(
                 job_id,
@@ -504,7 +609,9 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
             highlights.snap_to_words(clip, result["words"])
             if rules:
                 _fit_length(clip, settings.get("min_len"), settings.get("max_len"), info["duration"])
-        headline = next((c["headline"] for c in clips if c.get("headline")), "")
+            clip["start"], clip["end"] = _inside_one_piece(clip["start"], clip["end"], pieces,
+                                                           settings.get("min_len"))
+        headline =next((c["headline"] for c in clips if c.get("headline")), "")
 
         # 4b. Each moment built two ways — one unbroken stretch, and stitched
         # from the parts a cold viewer needs — then judged against each other.
@@ -513,8 +620,9 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
                 _stage(job_id, "Judging — building each clip two ways", 72)
                 ceiling = highlights.length_window(settings.get("min_len"), settings.get("max_len"),
                                                    settings.get("platforms") or None)[1]
-                structure.plan(title, clips, result["segments"], result["words"],
+                structure.plan(title, clips, _with_joins(result["segments"], pieces), result["words"],
                                info["duration"], headline, max_len=ceiling)
+                _variants_inside_pieces(clips, pieces, settings.get("min_len"))
                 _stage(job_id, "Judging continuous vs stitched", 74)
                 judge.compare(clips, result["words"], headline)
             except Exception as exc:
@@ -715,7 +823,8 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
     except Exception as exc:
         traceback.print_exc()
         store.update_job(job_id, status="failed", stage=_failed_stage(job_id),
-                         error=str(exc)[:500], progress=100)
+                         error=str(exc)[:500], progress=100,
+                         error_raw=(getattr(exc, "raw", "") or "")[:4000])      # yt-dlp's words, for Technical details
 
 
 def rerender_overlay(clip_id: str, edits: Dict[str, Any]) -> Dict[str, Any]:
@@ -792,6 +901,10 @@ def rerender_clip(clip_id: str, edits: Dict[str, Any]) -> Dict[str, Any]:
     end = float(edits.get("end", clip["end"]))
     if end - start < 1.0:
         raise RuntimeError("A clip needs to be at least 1 second long")
+    pieces = _pieces(store.source_meta(job))
+    if pieces and _inside_one_piece(start, end, pieces) != (start, end):
+        raise RuntimeError("That trim runs across a jump between two different parts of the stream — "
+                           "keep the clip inside one part")
 
     transcript = json.loads(job.get("transcript") or "{}")
     all_words = transcribe.in_order(transcript.get("words") or [])
