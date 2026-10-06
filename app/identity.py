@@ -676,7 +676,7 @@ def add_photo(campaign_id: str, file: Path) -> Dict[str, Any]:
     with _lock:
         folder = _dir(campaign_id) / "photos"
         folder.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(folder / name), img)
+        (folder / name).write_bytes(cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])[1].tobytes())
         have = [p for p in photos(campaign_id) if p.get("name") != name]
         have.append({"name": name, "kind": kind(), "vec": _pack(vec), "added": round(time.time(), 1)})
         _write(_dir(campaign_id) / "photos.json", have[-MAX_PHOTOS:])
@@ -700,7 +700,8 @@ def _photo_vectors(campaign_id: str) -> List[np.ndarray]:
         if p.get("kind") == how and p.get("vec"):
             out.append(_unpack(p["vec"]))
             continue
-        img = cv2.imread(str(photo_path(campaign_id, p.get("name") or "")))
+        pic = photo_path(campaign_id, p.get("name") or "")
+        img = cv2.imdecode(np.fromfile(str(pic), np.uint8), cv2.IMREAD_COLOR) if pic.is_file() else None
         if img is not None:
             vec, _ = _face_in_photo(img)
             if vec is not None:
