@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import (brandlogo, notify, campaign, compliance, framing, highlights, judge, media, overlay, render, store,
-               structure, styles, tighten, transcribe)
+               smartstitch, structure, styles, tighten, transcribe)
 from . import doctor
 
 
@@ -463,7 +463,8 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
         # 2. Audio, and the energy curve -------------------------------------
         _stage(job_id, "Extracting audio", 30)
         wav = media.extract_audio(source, job_id)
-        peaks = media.peak_windows(media.energy_curve(wav))
+        curve = media.energy_curve(wav)
+        peaks = media.peak_windows(curve)
 
         # 3. Transcribe, unless we already have this exact source -------------
         cached = store.cached_transcript(fingerprint)
@@ -508,15 +509,24 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
 
         # 4b. Each moment built two ways — one unbroken stretch, and stitched
         # from the parts a cold viewer needs — then judged against each other.
-        if settings.get("structure", True):
+        # The same pass proposes Smart Stitch's teasers, callbacks and reactions.
+        smart_on = smartstitch.allowed(rules)[0] and (smartstitch.mode_of(settings) != "never"
+                                                      or settings.get("inserts", True) is not False)
+        if settings.get("structure", True) or smart_on:
             try:
                 _stage(job_id, "Judging — building each clip two ways", 72)
                 ceiling = highlights.length_window(settings.get("min_len"), settings.get("max_len"),
                                                    settings.get("platforms") or None)[1]
                 structure.plan(title, clips, result["segments"], result["words"],
-                               info["duration"], headline, max_len=ceiling)
+                               info["duration"], headline, max_len=ceiling,
+                               loud=smartstitch.loud_gaps(curve, result["words"]))
                 _stage(job_id, "Judging continuous vs stitched", 74)
-                judge.compare(clips, result["words"], headline)
+                if settings.get("structure", True):
+                    judge.compare(clips, result["words"], headline)
+                else:                       # one version only, as asked: no stitched one
+                    for clip in clips:
+                        clip["variants"]["stitched"] = None
+                        structure.choose(clip, "continuous")
             except Exception as exc:
                 # The picks are good on their own: make them the plain way
                 # rather than losing the whole run to this step.
@@ -533,6 +543,13 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
                 clip["variants"] = {"continuous": structure._as_variant(
                     clip["start"], clip["end"], clip.get("hook", "")), "stitched": None}
                 structure.choose(clip, "continuous")
+
+        # 4c. Smart Stitch: a teaser of the best part up front, proof shots,
+        # reactions and callbacks — each checked against the honesty rules.
+        if smart_on:
+            _stage(job_id, "Looking for teasers, proof shots and reactions", 75)
+            smartstitch.prepare(job_id, source, clips, result["words"], settings, rules, headline,
+                                info["duration"])
 
         # 5. How is this video framed? ---------------------------------------
         source_plan = None
@@ -622,6 +639,7 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
                 edits["tone"] = tone.get(i)
                 extra_fields = {"post": posts[i], "caption": posts[i]["caption"],
                                 "hashtags": posts[i]["hashtags"]}
+            edits.update(smartstitch.clip_edits(clip, clip.get("parts") or [], settings, result["words"]))
             stitched = len(clip.get("parts") or []) > 1
             main_id = store.create_clip(job_id, {
                 **clip,
@@ -640,6 +658,7 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
                 alt_edits = render.merge_edits(_clip_edits(base_edits, alt, headline), style_edits.get(i) or {})
                 if rules:
                     alt_edits = {**campaign.clamp_edits(alt_edits, rules), "tone": tone.get(i)}
+                alt_edits.update(smartstitch.clip_edits(alt, alt["parts"], settings, result["words"]))
                 alt_stitched = len(alt["parts"]) > 1
                 alt_id = store.create_clip(job_id, {
                     **alt,
@@ -654,7 +673,14 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
         # Face sampling is as slow as encoding, so both happen in the pool.
         def build(clip_id: str, clip: Dict[str, Any], edits: Dict[str, Any]) -> None:
             parts = clip.get("parts") or []
-            if len(parts) > 1:
+            # A teaser or inserts: rendered with them; otherwise (or if they
+            # couldn't be drawn) the usual way below. `smart` says which.
+            out, words, saved, smart = smartstitch.render(source, clip_id, parts, edits, result["words"],
+                                                          settings, fps, info, source_plan, rules)
+            plan = source_plan
+            if out is not None:
+                pass
+            elif len(parts) > 1:
                 segments, words, saved, labels = build_parts(parts, result["words"], settings, fps)
                 plan = source_plan
                 out = render.render_clip(
@@ -682,6 +708,7 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
                 clip_id, file=str(out["file"]), thumb=str(out["thumb"]), status="ready",
                 words=json.dumps(words), saved=saved,
                 framing=json.dumps(used.to_json() if used else {}),
+                **({"edits": json.dumps({**edits, "smart": smart})} if smart or edits.get("smart") else {}),
             )
             if rules:
                 _gate_source(rules, clip_id)
@@ -811,6 +838,14 @@ def rerender_clip(clip_id: str, edits: Dict[str, Any]) -> Dict[str, Any]:
     saved = 0.0
     words = edits.get("words")
     fps = _frame_rate(source)
+
+    # A teaser or inserts (or asked for one): Smart Stitch re-makes it. Without
+    # them it says so in merged["smart"] and the usual re-render runs below.
+    done = smartstitch.rerender(clip, job, merged, edits, start, end, span_changed, all_words, info, plan,
+                                fps, rules, source)
+    if done is not None:
+        return done
+    words = edits.get("words")
 
     # A stitched clip keeps its parts. Dragging the trim handles means one
     # continuous stretch, so that turns it back into a continuous clip.

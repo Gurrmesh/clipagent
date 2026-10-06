@@ -44,6 +44,9 @@ def clip_json(clip: Dict[str, Any]) -> Dict[str, Any]:
     framing = json.loads(clip.get("framing") or "{}")
     parts = _loads(clip.get("parts"), [])
     length = sum(p["end"] - p["start"] for p in parts) if len(parts) > 1 else clip["end"] - clip["start"]
+    smart = (_loads(clip.get("edits"), {}) or {}).get("smart") or {}
+    if smart.get("length"):                  # a teaser or inserts: the length it really plays for
+        length = float(smart["length"]) + float(clip.get("saved") or 0)
     return {
         "id": clip["id"],
         "job_id": clip["job_id"],
@@ -144,6 +147,10 @@ def _settings(form: Dict[str, Any]) -> Dict[str, Any]:
         "motion": bool(form.get("motion", True)),
         "structure": bool(form.get("structure", True)),
         "alternates": bool(form.get("alternates", True)),
+        # Smart Stitch: open with a teaser of the best part (decide/always/never), proof shots and reactions
+        "teaser": str(form.get("teaser") or "decide") if str(form.get("teaser") or "decide") in
+        ("decide", "always", "never") else "decide",
+        "inserts": bool(form.get("inserts", True)),
         "headline": bool(form.get("headline", True)),
         "auto_style": bool(form.get("auto_style", True)),
         "style_recipe": str(form.get("style_recipe") or "auto"),
@@ -209,6 +216,8 @@ async def create_job(
     motion: bool = Form(True),
     structure: bool = Form(True),
     alternates: bool = Form(True),
+    teaser: str = Form("decide"),
+    inserts: bool = Form(True),
     headline: bool = Form(True),
     auto_style: bool = Form(True),
     style_recipe: str = Form("auto"),
@@ -228,7 +237,8 @@ async def create_job(
         "max_clips": max_clips, "layout": layout, "caption_style": caption_style,
         "caption_position": caption_position, "tighten": tighten,
         "drop_fillers": drop_fillers, "auto_frame": auto_frame, "motion": motion,
-        "structure": structure, "alternates": alternates, "headline": headline,
+        "structure": structure, "alternates": alternates, "teaser": teaser, "inserts": inserts,
+        "headline": headline,
         "auto_style": auto_style, "style_recipe": style_recipe, "doctor": doctor, "accent": accent,
         "platforms": platforms, "logo": logo, "logo_corner": logo_corner,
     })

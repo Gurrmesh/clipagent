@@ -268,10 +268,19 @@ def check_source(rb: Dict[str, Any], clip: Dict[str, Any], edits: Dict[str, Any]
     checks.append(_length(r, seconds))
 
     parts = clip.get("parts") or []
+    smart = edits.get("smart") or {}                  # Smart Stitch: what the render really added
+    joins = len(parts) if len(parts) > 1 else 1
+    joins += (1 if smart.get("teaser") else 0) + len(smart.get("inserts") or [])
     if not a["stitch"]:
-        checks.append(_item("stitch", "One unbroken moment", "pass" if len(parts) <= 1 else "fail",
-                            "A single stretch of the video." if len(parts) <= 1 else
-                            f"Joins {len(parts)} moments — the brief doesn't allow that."))
+        checks.append(_item("stitch", "One unbroken moment", "pass" if joins <= 1 else "fail",
+                            "A single stretch of the video." if joins <= 1 else
+                            f"Joins {joins} moments (a teaser or inserts count) — the brief doesn't allow that."))
+    if (smart.get("rewind") or {}).get("sound") and not a["music"]:
+        checks.append(_item("music", "No added sound", "fail", "The teaser's rewind has a sound effect — "
+                                                               "the brief doesn't allow added sound."))
+    if smart.get("rewind") and not a["speed"]:
+        checks.append(_item("speed", "No speed changes", "fail", "The teaser's rewind plays fast in reverse — "
+                                                                 "the brief doesn't allow speed changes."))
     if not a["cut"]:
         cut = bool(edits.get("tighten")) or float(clip.get("saved") or 0) > 0.05
         checks.append(_item("cut", "Nothing cut from the middle", "fail" if cut else "pass",

@@ -18,10 +18,49 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from . import highlights, toolio
+from . import highlights, smartstitch, toolio
 from .config import CLAUDE_MODEL
 
-ROLES = ["premise", "before", "setup", "progress", "payoff", "after"]
+ROLES = ["premise", "before", "setup", "callback", "progress", "payoff", "after"]
+FUNNY_MAX = 35.0            # a stitched funny/hype moment stays this tight
+
+_QUOTE = {"type": "string", "description": "Its exact words, copied from the transcript. For a part longer "
+                                          "than ~12 s: its first 8-12 words … its last 8-12 words."}
+TEASER_SCHEMA = {
+    "type": "object",
+    "description": "Optional flash-forward: the single strongest 1.5-3 s inside the payoff (the reaction, the "
+                   "number, the punchline's first words), shown first, before the story. Omit it, or set "
+                   "spoils_surprise, when knowing it up front would spoil a surprise.",
+    "properties": {
+        "start": {"type": "number"}, "end": {"type": "number"},
+        "quote": _QUOTE,
+        "label": {"type": "string", "enum": ["HOW IT STARTED", "BUT FIRST", ""],
+                  "description": "Shown when the story starts after the teaser."},
+        "spoils_surprise": {"type": "boolean"},
+        "why": {"type": "string", "description": "One line: why this is the moment to tease."},
+    },
+    "required": ["start", "end", "quote", "why"],
+}
+INSERTS_SCHEMA = {
+    "type": "array",
+    "description": "Optional, max 3. callback: an EARLIER line (1.5-4 s) that a line in this clip refers back to "
+                   "('remember I said I'd never…'). reaction: a real laugh or shout (0.7-2 s) that came right "
+                   "after a line in this clip but isn't in it.",
+    "items": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["callback", "reaction"]},
+            "at": {"type": "number", "description": "Absolute seconds: when the line it goes with is said in the clip."},
+            "refers_to": {"type": "string", "description": "callback: the exact words of the line in the clip that refers back."},
+            "reacts_to": {"type": "string", "description": "reaction: the exact words of the line it reacts to."},
+            "start": {"type": "number"}, "end": {"type": "number"},
+            "quote": {"type": "string", "description": "Its exact words ('' for a laugh with no words)."},
+            "sound": {"type": "string", "enum": ["laugh", "shout", "silent"]},
+            "why": {"type": "string"},
+        },
+        "required": ["kind", "at", "start", "end", "quote", "why"],
+    },
+}
 
 STRUCTURE_TOOL = {
     "name": "submit_structures",
@@ -46,7 +85,7 @@ STRUCTURE_TOOL = {
                         },
                         "stitched": {
                             "type": "object",
-                            "description": "Omit for funny and hype moments, or when nothing elsewhere in the video adds to this one.",
+                            "description": "Omit when nothing elsewhere in the video adds to this one — and for funny and hype moments unless a setup or earlier mention elsewhere makes the punchline land harder.",
                             "properties": {
                                 "parts": {
                                     "type": "array",
@@ -56,9 +95,10 @@ STRUCTURE_TOOL = {
                                             "start": {"type": "number"},
                                             "end": {"type": "number"},
                                             "role": {"type": "string", "enum": ROLES},
-                                            "label": {"type": "string", "description": "1-3 words on screen when time jumps into this part ('BEFORE', '5 MONTHS LATER', 'AFTER'). Empty when no jump needs marking."},
+                                            "label": {"type": "string", "description": "1-3 words on screen when time jumps into this part ('BEFORE', 'AFTER', 'LATER'). A number only when it is said in the video. Empty when no jump needs marking."},
+                                            "quote": _QUOTE,
                                         },
-                                        "required": ["start", "end", "role", "label"],
+                                        "required": ["start", "end", "role", "label", "quote"],
                                     },
                                 },
                                 "hook": {"type": "string", "description": "Max 8 words, understandable with zero context."},
@@ -66,6 +106,8 @@ STRUCTURE_TOOL = {
                             "required": ["parts", "hook"],
                         },
                         "why": {"type": "string", "description": "One line: what the stitched version adds, or why there is none."},
+                        "teaser": TEASER_SCHEMA,
+                        "inserts": INSERTS_SCHEMA,
                     },
                     "required": ["id", "continuous", "why"],
                 },
@@ -87,8 +129,7 @@ opening on the setup line closest to the punchline and ending on the laugh.
 STITCHED — the payoff plus the context a cold viewer needs, taken from wherever it is in the \
 video: the premise ("This field will be a city by the end of this video"), the before (the \
 family sleeping in one room), the problem ("they need water"), who this person is — then the payoff.
-- Build one for every candidate except funny and hype moments, whenever anything elsewhere in \
-the video could make the payoff hit harder. A judge compares the two versions afterwards, so \
+- Build one whenever anything elsewhere in the video could make the payoff hit harder. A judge compares the two versions afterwards, so \
 you do not need to be sure it wins; skip only when nothing elsewhere adds to this moment.
 - 2-4 parts in story order. Each part is a complete thought: it starts on the first word of a \
 sentence and ends on the last word of one. No part shorter than 3 seconds.
@@ -97,7 +138,22 @@ it to its strongest stretch rather than keeping all of it.
 - 20-60 seconds in total. Never pad: a stitched version that only adds length is worse.
 - label: 1-3 words shown on screen when time jumps into a part ("BEFORE", "5 MONTHS LATER", \
 "AFTER", "THE REVEAL"). Leave it empty when no jump needs marking.
-- Funny and hype moments carry themselves: never stitch them.
+- quote: every part's exact words, copied from the transcript (a long part: its first words … its \
+last words). Parts whose quote doesn't match what is said there are thrown out.
+- Funny and hype moments usually carry themselves. Stitch one ONLY when its setup, an earlier \
+mention or a running joke sits elsewhere in the video and makes the punchline land harder: include \
+that part with role "setup" or "callback", keep the whole thing under 35 seconds, leave the \
+punchline part untouched and end on the laugh. Otherwise give no stitched version.
+
+TEASER (optional, for either version) — the single strongest 1.5-3 seconds inside the payoff (the \
+reaction, the number, the punchline's first words), shown first so the viewer knows a payoff is \
+coming; the story then plays in full. Whole sentences only. Leave it out (or set spoils_surprise) \
+when knowing it up front would spoil a surprise.
+
+INSERTS (optional, max 3) — callback: an earlier line, 1.5-4 seconds, that a line in the clip refers \
+back to ("remember I said I'd never…"). reaction: a real laugh or shout, 0.7-2 seconds, that came \
+right after a line in the clip but isn't in it. "at" is when the line it goes with is said. Only \
+what is really there; none is fine.
 
 Hooks: each version gets its own, max 8 words, understandable by someone who has never seen \
 the video — who or what, not a riddle.
@@ -146,7 +202,10 @@ def _clean_part(part: Dict[str, Any], words, duration: float) -> Optional[Dict[s
     s, e = highlights.clean_bounds(s, e, words, min_len=2.0)
     role = part.get("role") if part.get("role") in ROLES else "setup"
     label = " ".join((part.get("label") or "").upper().split()[:3])[:24]
-    return {"start": round(s, 2), "end": round(e, 2), "role": role, "label": label}
+    out = {"start": round(s, 2), "end": round(e, 2), "role": role, "label": label}
+    if "quote" in part:
+        out["quote"] = highlights._text(part.get("quote"))[:400]
+    return out
 
 
 def stitch_problem(parts: List[Dict[str, Any]], continuous: Dict[str, Any], max_len: float = 90.0) -> str:
@@ -194,11 +253,14 @@ def _valid_stitch(parts: List[Dict[str, Any]], continuous: Dict[str, Any]) -> bo
 
 def plan(title: str, clips: List[Dict[str, Any]], segments: List[Dict[str, Any]],
          words: List[Dict[str, Any]], duration: float, headline: str = "",
-         max_len: float = 90.0) -> List[Dict[str, Any]]:
+         max_len: float = 90.0, loud: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
     """Attach clip["variants"] = {"continuous": {...}, "stitched": {...} | None} to each clip.
 
     `max_len` is this run's ceiling (where the clips are going): neither
-    version may grow past it while pulling in setup."""
+    version may grow past it while pulling in setup. `loud` = stretches that
+    are loud with nobody talking (smartstitch.loud_gaps), hints for reactions.
+    Claude's teaser and insert ideas are kept raw on the clip ("teaser_raw",
+    "inserts_raw") for smartstitch to check."""
     for clip in clips:                                   # a safe default, whatever happens below
         clip["variants"] = {"continuous": _as_variant(clip["start"], clip["end"], clip.get("hook", "")),
                             "stitched": None}
@@ -215,6 +277,8 @@ def plan(title: str, clips: List[Dict[str, Any]], segments: List[Dict[str, Any]]
             f"[{i}] type={c.get('type', 'story')} {c['start']:.1f}-{c['end']:.1f}s "
             f"({c['end'] - c['start']:.0f}s) \"{c.get('title', '')}\" hook: \"{c.get('hook', '')}\""
             + (f" | a cold viewer is missing: {c['context_note']}" if c.get("context_note") else "")
+            + (f" | {smartstitch.loud_text(loud, c['start'], c['end'])}"
+               if loud and smartstitch.loud_text(loud, c["start"], c["end"]) else "")
         )
     prompt = (f"Video: {title or 'Untitled'}\n"
               + (f"Premise, as one line: {headline}\n" if headline else "")
@@ -267,15 +331,70 @@ def _apply(clip: Dict[str, Any], item: Dict[str, Any], words: List[Dict[str, Any
     st = toolio.as_dict(item.get("stitched"))
     raw_parts = [p for p in toolio.as_list(st.get("parts")) if isinstance(p, dict)]
     clip["structure_raw"] = item
+    clip["teaser_raw"] = toolio.as_dict(item.get("teaser")) or None
+    clip["inserts_raw"] = [i for i in toolio.as_list(item.get("inserts")) if isinstance(i, dict)][:6]
     if raw_parts:
         parts = clean_stitch(raw_parts, words, duration, limit=min(FIT_SECONDS, max_len))
         problem = stitch_problem(parts, clip["variants"]["continuous"], max_len=min(90.0, max_len))
+        if not problem:
+            # The honesty rules (smart stitch section 0): quotes verified, whole
+            # sentences, true time labels — a part that fails is dropped.
+            parts, dropped = honest_parts(parts, words)
+            problem = stitch_problem(parts, clip["variants"]["continuous"], max_len=min(90.0, max_len))
+            if dropped and problem:
+                problem = f"{problem} after dropping parts: {'; '.join(dropped)}"[:200]
+        if not problem and clip.get("type") in ("funny", "hype"):
+            problem = funny_problem(parts, clip["variants"]["continuous"])
         clip["stitch_problem"] = problem
         if not problem:
             clip["variants"]["stitched"] = {"parts": parts, "hook": highlights._text(st.get("hook"))[:70]}
     else:
         clip["stitch_problem"] = "none proposed"
     clip["structure_note"] = highlights._text(item.get("why"))[:200]
+
+
+def honest_parts(parts: List[Dict[str, Any]], words: List[Dict[str, Any]]) -> tuple:
+    """Rule 0 on a proposed stitch: each part's quote must match what is said
+    there, each part is whole sentences, and a time label is only kept when
+    it is true. Returns (parts that pass, why the others didn't)."""
+    from . import stitchrules
+    kept: List[Dict[str, Any]] = []
+    dropped: List[str] = []
+    for p in parts:
+        ok, why = stitchrules.check_quote(p.get("quote", ""), words, p["start"], p["end"])
+        if ok:
+            ok, why = stitchrules.check_sentences(p["start"], p["end"], words)
+        if not ok:
+            dropped.append(f"{p['start']:.0f}-{p['end']:.0f}s: {why}")
+            continue
+        kept.append(dict(p))
+    for i, p in enumerate(kept):
+        if not p.get("label"):
+            continue
+        if i > 0:
+            prev = kept[i - 1]
+            said = _span_text(words, prev["start"], prev["end"]) + " " + _span_text(words, p["start"], p["end"])
+            p["label"] = stitchrules.true_label(p["label"], p["start"] - prev["end"], said)
+        else:
+            p["label"] = stitchrules.true_label(p["label"], None, _span_text(words, p["start"], p["end"]))
+    return kept, dropped
+
+
+def funny_problem(parts: List[Dict[str, Any]], continuous: Dict[str, Any]) -> str:
+    """A funny or hype moment may only be stitched when a setup or callback
+    elsewhere makes the punchline land harder: tight, the punchline left
+    whole, ending on the laugh. Why not, or ""."""
+    payoff = parts[-1]
+    if payoff.get("role") != "payoff":
+        return "a funny moment has to end on its punchline"
+    if not any(p.get("role") in ("setup", "callback") and p["end"] <= payoff["start"] + 0.5 for p in parts[:-1]):
+        return "a funny moment is only stitched when a setup or callback from elsewhere comes first"
+    total = sum(p["end"] - p["start"] for p in parts)
+    if total > FUNNY_MAX:
+        return f"{total:.0f}s — a stitched funny moment stays under {FUNNY_MAX:.0f}s"
+    if payoff["end"] < continuous["end"] - 1.0:
+        return "the punchline part stops before the laugh"
+    return ""
 
 
 def clean_stitch(raw_parts: List[Dict[str, Any]], words: List[Dict[str, Any]],
@@ -314,6 +433,8 @@ def viewer_view(variant: Dict[str, Any], words: List[Dict[str, Any]], headline: 
     for n, p in enumerate(variant["parts"], 1):
         span = p["end"] - p["start"]
         tag = f" — on-screen label \"{p['label']}\"" if p.get("label") else ""
+        if p.get("role") == "teaser":
+            tag = " — a flash-forward: this exact moment plays again later in the clip, then a quick rewind"
         lines.append(f"Part {n} [{t:.0f}-{t + span:.0f}s]{tag}: \"{_span_text(words, p['start'], p['end'])}\"")
         t += span
     return "\n".join(lines)

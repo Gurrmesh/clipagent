@@ -247,6 +247,9 @@ def _loads(text: Any, default: Any) -> Any:
 
 
 def _clip_seconds(clip: Dict[str, Any]) -> float:
+    smart = (_loads(clip.get("edits"), {}) or {}).get("smart") or {}
+    if smart.get("length"):                       # with a teaser or inserts: what it really plays for
+        return float(smart["length"])
     parts = _loads(clip.get("parts"), [])
     if len(parts) > 1:
         return sum(p["end"] - p["start"] for p in parts) - float(clip.get("saved") or 0)

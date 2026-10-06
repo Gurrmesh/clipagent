@@ -217,7 +217,8 @@ def plan_fixes(checks: List[Dict[str, str]], review: Optional[Dict[str, Any]], e
     """Edits that fix what was found, and a line for each fix."""
     change: Dict[str, Any] = {}
     notes: List[str] = []
-    stitched = len(json.loads(clip.get("parts") or "[]")) > 1
+    stitched = len(json.loads(clip.get("parts") or "[]")) > 1 \
+        or len((edits.get("smart") or {}).get("parts") or []) > 1      # a teaser or a callback: no trims
     by_id = {c["id"]: c for c in checks}
     if may_trim and not stitched:
         start, end = float(clip["start"]), float(clip["end"])

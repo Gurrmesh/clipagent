@@ -163,3 +163,39 @@ def compare(clips: List[Dict[str, Any]], words: List[Dict[str, Any]], headline: 
         clip["judge"] = result
         structure.choose(clip, result["winner"])
     return clips
+
+
+def compare_teaser(clips: List[Dict[str, Any]], words: List[Dict[str, Any]], headline: str = "") -> List[Dict[str, Any]]:
+    """Smart Stitch's "let ClipAgent decide": the chosen version of each clip
+    with and without its teaser, judged the same blind way (A/B at random,
+    twice, swapped). The teaser has to win clearly (by more than TIE) — when
+    it's close, the simpler clip without it wins. Sets clip["teaser_verdict"]
+    = {"without", "with", "margin", "winner": "with"|"without", "why"}."""
+    from . import smartstitch
+    pseudo = []
+    for c in clips:
+        plain = c["variants"].get(c.get("variant") or "continuous") or c["variants"]["continuous"]
+        c["teaser_verdict"] = {"winner": "without", "why": "not judged"}
+        pseudo.append({"variants": {"continuous": plain, "stitched": smartstitch.with_teaser(plain, c["teaser"])},
+                       "headline": c.get("headline")})
+    if not pseudo:
+        return clips
+    try:
+        client = highlights._client()
+        runs = [_run(client, pseudo, words, headline, flip=False), _run(client, pseudo, words, headline, flip=True)]
+    except Exception as exc:
+        highlights.LAST_ERROR = str(exc)[:300]
+        return clips
+    for i, c in enumerate(clips):
+        got = [r[i] for r in runs if i in r and "stitched" in r[i] and "continuous" in r[i]]
+        if not got:
+            continue
+        avg = {v: overall({k: sum(g[v][k] for g in got) / len(got) for k in CRITERIA})
+               for v in ("continuous", "stitched")}
+        margin = round(avg["stitched"] - avg["continuous"], 2)
+        c["teaser_verdict"] = {"without": avg["continuous"], "with": avg["stitched"], "margin": margin,
+                               "winner": "with" if margin > TIE else "without",
+                               "why": "; ".join(g["why"] for g in got if g["why"])[:300]}
+        if isinstance(c.get("judge"), dict):
+            c["judge"]["teaser"] = c["teaser_verdict"]
+    return clips
