@@ -242,6 +242,9 @@ expect(money.fetch_stats("https://www.youtube.com/shorts/x2") is None and media.
        "a view check that meets the robot check pauses YouTube downloads too")
 yt_dlp.YoutubeDL = real_ydl
 media.clear_bot_block()
+age = "ERROR: [youtube] q1: Sign in to confirm your age. This video may be inappropriate for some users."
+expect(not media.noticed_bot_check(age, "https://www.youtube.com/watch?v=q1") and media.bot_block() is None
+       and "age-restricted" in media.explain_download_error(age), "YouTube's age check doesn't pause anything")
 
 # ============================================================================================
 print("\n== 2. a 6-hour Twitch VOD: listen first, download only the loud parts")

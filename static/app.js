@@ -430,7 +430,7 @@ function sourceName(src) {
 function niceTitle(v) {
   const t = (v.title || '').trim();
   if (t && !/^https?:\/\//.test(t)) return t.replace(/\.(mp4|mov|mkv|webm|m4v|avi)$/i, '');
-  if (v.status === 'running' || v.status === 'queued') return 'Getting the video…';
+  if ((v.status === 'running' || v.status === 'queued') && !v.paused) return 'Getting the video…';
   const host = sourceName(v.source || t);
   return host ? `Video from ${host}` : 'Untitled video';
 }
@@ -506,6 +506,8 @@ async function resumeYouTube(btn) {
 ['dlpause-make', 'dlpause-videos'].forEach(id => $(id).addEventListener('click', (ev) => {
   const btn = ev.target.closest('[data-act="resume"]');
   if (btn) resumeYouTube(btn);
+  if (ev.target.closest('a[href="#/settings"]'))      // straight to the cookies help
+    setTimeout(() => $('set-youtube-card').scrollIntoView({ behavior: 'smooth', block: 'start' }), 120);
 }));
 function keepPolling(render) {
   clearInterval(listPoll);

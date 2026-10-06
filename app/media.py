@@ -240,8 +240,9 @@ def youtube_paused(url: str) -> bool:
 
 
 def is_bot_check(text: str) -> bool:
+    """YouTube's "Sign in to confirm you're not a bot" — not its age check ("…confirm your age")."""
     t = (text or "").lower()
-    return "not a bot" in t or "sign in to confirm" in t
+    return "not a bot" in t or ("sign in to confirm" in t and "your age" not in t and "age-restricted" not in t)
 
 
 def noticed_bot_check(text: str, url: str = "") -> bool:
@@ -262,7 +263,7 @@ def explain_download_error(text: str, url: str = "") -> str:
     """What went wrong with a download, in plain words, and what to do."""
     t = (text or "").lower()
     has_cookies = bool(ytdlp_auth())
-    if "not a bot" in t or "sign in to confirm" in t:
+    if is_bot_check(t):
         if has_cookies:
             return ("YouTube is still blocking downloads from this PC, even with the cookies — they may "
                     "have expired. Export fresh cookies.txt from the spare account, or wait an hour "
@@ -294,6 +295,9 @@ def explain_download_error(text: str, url: str = "") -> str:
     if ("getaddrinfo" in t or "timed out" in t or "connection" in t and "refused" in t
             or "unable to download webpage" in t or "network is unreachable" in t):
         return "Couldn't reach the site — check the PC's internet connection and try again."
+    if "cannot be partially downloaded" in t:
+        return ("That site doesn't let ClipAgent download just parts of a video, and the whole video is too "
+                "long. Download it yourself, cut out the stretches you want, and upload those files.")
     if "requested format is not available" in t:
         return "No downloadable video format was offered for that link. Try again later, or upload the file."
     last = [ln for ln in (text or "").strip().splitlines() if ln.strip()]
@@ -572,6 +576,8 @@ def download_sections(url: str, sections: List[Tuple[float, float]], out_dir: Pa
                 break
             if noticed_bot_check(last, url):
                 raise BotBlocked(pause_message(), raw=last, hit=True)
+            if "cannot be partially downloaded" in last.lower():      # no use trying again, or the next part
+                raise DownloadError(explain_download_error(last, url), raw=last)
             if attempt < SECTION_TRIES - 1:
                 _sleep(5 * (attempt + 1))
         if got:

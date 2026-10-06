@@ -275,19 +275,24 @@ def _with_joins(segments: List[Dict[str, Any]], pieces: List[Tuple[float, float]
     return sorted(list(segments) + marks, key=lambda s: s["start"])
 
 
+def _crosses_join(start: float, end: float, pieces: List[Tuple[float, float]]) -> bool:
+    """True when a span runs across a join (not even one frame of the part next door is allowed)."""
+    return bool(pieces) and not any(a - 0.01 <= start and end <= b + 0.01 for a, b in pieces)
+
+
 def _inside_one_piece(start: float, end: float, pieces: List[Tuple[float, float]],
                       lo: Optional[float] = None) -> Tuple[float, float]:
     """Keep a span inside the part that holds most of it: what's across the join is unrelated.
     If that leaves it too short, it grows away from the join, inside the same part."""
-    if not pieces:
+    if not pieces or not _crosses_join(start, end, pieces):
         return start, end
     overlap = lambda p: min(end, p[1]) - max(start, p[0])         # noqa: E731
-    a, b = max(pieces, key=overlap)
-    if overlap((a, b)) <= 0:                                       # off the end: the nearest part
-        a, b = min(pieces, key=lambda p: min(abs(start - p[1]), abs(end - p[0])))
-    a, b = a + 0.05, b - 0.05                                      # never a frame of the next part
-    if start >= a and end <= b:
-        return start, end
+    k = max(range(len(pieces)), key=lambda n: overlap(pieces[n]))
+    if overlap(pieces[k]) <= 0:                                    # off the end: the nearest part
+        k = min(range(len(pieces)), key=lambda n: min(abs(start - pieces[n][1]), abs(end - pieces[n][0])))
+    a, b = pieces[k]
+    a += 0.05 if k > 0 else 0.0                                    # never a frame of the part next door
+    b -= 0.05 if k < len(pieces) - 1 else 0.0
     need = min(end - start, max(float(lo or 0), highlights.MIN_LEN), b - a)
     s, e = max(start, a), min(end, b)
     if e - s < need:
@@ -311,7 +316,7 @@ def _variants_inside_pieces(clips: List[Dict[str, Any]], pieces: List[Tuple[floa
                 v["continuous"] = structure._as_variant(s, e, cont.get("hook", ""))
         st = v.get("stitched")
         if st:
-            homes = {next((n for n, (a, b) in enumerate(pieces) if a - 0.05 <= p["start"] and p["end"] <= b + 0.05),
+            homes = {next((n for n, (a, b) in enumerate(pieces) if a - 0.01 <= p["start"] and p["end"] <= b + 0.01),
                           -1) for p in st.get("parts") or []}
             if len(homes) != 1 or -1 in homes:
                 v["stitched"] = None
@@ -901,8 +906,7 @@ def rerender_clip(clip_id: str, edits: Dict[str, Any]) -> Dict[str, Any]:
     end = float(edits.get("end", clip["end"]))
     if end - start < 1.0:
         raise RuntimeError("A clip needs to be at least 1 second long")
-    pieces = _pieces(store.source_meta(job))
-    if pieces and _inside_one_piece(start, end, pieces) != (start, end):
+    if _crosses_join(start, end, _pieces(store.source_meta(job))):
         raise RuntimeError("That trim runs across a jump between two different parts of the stream — "
                            "keep the clip inside one part")
 
