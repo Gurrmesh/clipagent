@@ -236,8 +236,8 @@ ff("-i", str(TMP / "raw_low.mp4"), "-vf", "crop=1080:1360:0:0,pad=1080:1920:0:56
    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy", str(low))
 face_src = {"H": {"source_path": str(high)}, "L": {"source_path": str(low)}}
 talk = {k: [{"w": w, "start": round(1.0 + i * 0.42, 2), "end": round(1.3 + i * 0.42, 2)}
-            for i, w in enumerate(("stay hungry and never stop because the work you put in today pays you "
-                                   "back for years so keep going ") * 6).split()]
+            for i, w in enumerate((("stay hungry and never stop because the work you put in today pays you "
+                                    "back for years so keep going ") * 6).split())]
         for k in ("H", "L")}
 captured = {}
 _real_build_ass = editrender.build_ass
