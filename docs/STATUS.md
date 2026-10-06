@@ -1,6 +1,7 @@
 # ClipAgent — what exists, what's broken, what's next
 
-Last updated: 5 Oct 2026 — the Edit Maker is built (waiting for gs to try it on the PC).
+Last updated: 6 Oct 2026 — fixes after the first real TJR clips and edits (Part 1); Creator Scan and Smart
+Stitch are being built.
 
 ## 1. Features that exist and work (tested on the PC)
 
@@ -48,6 +49,45 @@ Last updated: 5 Oct 2026 — the Edit Maker is built (waiting for gs to try it o
   the last video with the last song.
 - A 20 s edit renders in ~25 s on a 4-core cloud machine (the PC should be similar).
 
+### Fixes after the first real TJR clips and edits (6 Oct) — built in Claude Code, to be tried on the PC
+- **Edit moments the right length**: every style has a moment length window enforced in code (Funny 3–8 s, Velocity
+  1.5–4 s, Motivation 4–10 s, Aura 1.5–5 s, Flow 0.75–3 s, Cinematic 4–12 s, Money 1.5–5 s). Each moment is cut to its
+  punchline on word boundaries (voice styles on sentence edges); a moment that can't be cut cleanly is left out with
+  the reason. The finished edit stays within ±15% of the length asked (and inside a campaign's min/max). "Tell
+  ClipAgent what to change" can shorten, lengthen or trim one moment ("cut the first 2 seconds of moment 3", "end the
+  first moment right after he says …"); the edit page has Shorter / Longer per moment.
+- **Brief reader**: now reads the "What to look for" list (given to the moment pickers), date rules ("clips from 2026
+  onwards" — older videos are refused right after the download, before any transcribing), "caption / text overlay
+  must mention TJR" (added in code when the writer forgets; the check blocks it if missing), "TJR must be the primary
+  focus", "no logos" (anywhere in the video) and "no AI-generated video". "No reposts / collab posts" is no longer read
+  as "no joining moments" (it's a posting rule). Saved campaigns: Rules → **Read the brief again** adds the new rules
+  and keeps every choice gs made.
+- **Downloads**: when YouTube asks "confirm you're not a bot", ClipAgent pauses YouTube downloads (links stay saved,
+  other sites keep going), explains what to do (wait, cookies from a spare account, or upload the file), tries once by
+  itself after ~45 min and has a **Try again now** button; one Telegram message, `/resume`. The pause survives a
+  restart, and queued links run again after a restart instead of failing. Streams longer than 4 hours download only
+  their liveliest parts (found by listening to the sound only first), joined into one source; no clip crosses a join;
+  clip cards say where in the stream each clip is. Every job keeps the video's facts (upload date, channel…).
+- **Who is on screen and talking** (campaign clips): faces are tracked through the clip, the one whose mouth moves
+  with the words is the talker, and the creator is recognised from reference faces (photos gs adds on the campaign
+  page — "Who is TJR?" — plus faces learned from his solo videos). One Claude look per clip (context only, never face
+  recognition) says who says the key lines. If the brief needs the creator as the main person, a clip where someone
+  else does the talking is Blocked ("Timmy is the one talking in this clip…"); otherwise a hook/caption that credits
+  the creator with someone else's words is rewritten. The moment picker also records who speaks each moment.
+- **More campaign checks**: logos, sponsor banners, "use code" promos and watermarks in the footage (Blocked when the
+  brief bans logos, with what/where/when); offensive words and slurs (cut out with one re-render when short and not
+  the hook or punchline, otherwise Blocked); AI-generated footage on screen (Blocked when the brief bans AI). Spoken
+  promos or AI mentions alone → Check first. Edits get the same checks.
+- **No half-cut words**: big titles burned into the creator's video are found (OpenCV only) and the vertical crop
+  keeps them whole, keeps them fully out, or shows the whole picture; the clip's note says what was done. The hook and
+  cards avoid faces and his titles in every layout. Moments where a title forces the whole picture rank a little
+  lower. Edit Maker moments follow the same rule.
+- **Small facecam streams/reactions**: split screen with the face big on top (45% of the height) and the game/video
+  below, captions at the seam; kept through re-renders, doctor fixes and undo.
+- **Tidy-ups**: test tools back in `tools/`, the icon in `static/`, READMEs restored, every test prints safely on
+  Windows when its output goes to a file, `-vsync 0` replaced, and tests that used to write into the real `data/`
+  folder now always use a temporary folder.
+
 ### Campaigns
 - Paste a brief → Claude reads it into a rulebook (permissions with quotes and line numbers, grey areas to decide,
   hashtags, caption lines, lengths, brand logo rule, pay terms, platforms, posting rules) → review card → save.
@@ -79,8 +119,19 @@ Light / dark / match computer; Telegram status and setup steps; brand logo + cor
 - **Rendering is CPU-bound** (i7-1255U): ~30–90 s per clip; the process pool gives ~12%.
 - **Clip length vs platform**: the length ceiling by platform (Shorts ≤ ~52 s) was added on 5 Oct; confirm on new runs
   that clips stay in range (the clip doctor flags long ones).
-- **Brief reading isn't perfect**: e.g. TJR's "no reposts/collab posts" was misread as "no joining moments" — gs's
-  review step fixes this; keep the review card prominent.
+- **Brief reading isn't perfect**: it is now much better (see the 6 Oct fixes) but still depends on Claude; the
+  backup checks in code only catch plain wordings. Keep the review card prominent.
+- **TJR campaign, joining moments**: the brief doesn't say whether joining moments is allowed, so edits and stitched
+  clips stay off until gs answers "Join different moments?" on the campaign's Rules page.
+- **Who's on screen (6 Oct)**: face matching works without a face-recognition model, so it is approximate; its
+  thresholds were set on drawn faces. Add 1–3 clear photos of TJR on the campaign page. Costs one extra Claude look
+  per campaign clip (~10k tokens). Without a Claude key every campaign clip shows "Check first".
+- **Burned-in text (6 Oct)**: the detector misses ~5–10% of titles whole (an end letter, a short word on a busy
+  background); low-contrast text with no outline isn't found. The classic engine has no text check.
+- **Long streams (6 Oct)**: Twitch chat replay isn't available through yt-dlp any more, so the liveliest parts are
+  found by loudness only (quiet great moments can be missed); downloading exact parts re-encodes them (~20–40 min on
+  the PC for 60 min of 1080p60). The Edit Maker could still cut a moment across a join in a long-stream source.
+- **Not tried against the real sites yet**: the bot-check pause and the long-stream parts were tested offline only.
 - A campaign brief that says nothing about music → music counts as NOT allowed until gs allows it in the rules.
 - Undo is one step deep. Typed change requests can't create a brand-new clip from another part of the video yet.
 - The editor needs the original video on disk (`data/sources`) to trim or re-render.
@@ -96,6 +147,7 @@ Light / dark / match computer; Telegram status and setup steps; brand logo + cor
   Minutes; TJR Reacts to the TJR and Aiden videos; Teaching My Friend How To Day Trade). The first finished (6 clips:
   5 ready, 1 to check). Check the others in My videos.
 - **Edit Maker**: built and tested in the cloud (pull request open) — waiting for gs to try it on the PC.
+- **Fixes after real use (Part 1)**: built and tested in the cloud (pull request open) — waiting for gs to try them.
 
 ## 4. Backlog, in order
 1. ~~Edit Maker — `docs/EDIT_MAKER_PLAN.md`~~ built (see above).
