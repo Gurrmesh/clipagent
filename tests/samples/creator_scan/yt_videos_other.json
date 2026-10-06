@@ -1,0 +1,15 @@
+{
+ "id": "UCbbbbbbbbbbbbbbbbbbbbbb", "channel": "T Riches", "title": "T Riches - Videos", "_type": "playlist",
+ "extractor": "youtube:tab", "webpage_url": "https://www.youtube.com/@TRichesTrades/videos",
+ "entries": [
+  {"_type": "url", "ie_key": "Youtube", "id": "bbbbbbbbbb1", "url": "https://www.youtube.com/watch?v=bbbbbbbbbb1",
+   "title": "How I Made My FIRST Million Trading!", "duration": 1255.0, "timestamp": 1754092800,
+   "view_count": 40000, "live_status": null},
+  {"_type": "url", "ie_key": "Youtube", "id": "bbbbbbbbbb2", "url": "https://www.youtube.com/watch?v=bbbbbbbbbb2",
+   "title": "Market Psychology Explained", "duration": 700.0, "timestamp": 1757980800, "view_count": 30000,
+   "live_status": null},
+  {"_type": "url", "ie_key": "Youtube", "id": "bbbbbbbbbb3", "url": "https://www.youtube.com/watch?v=bbbbbbbbbb3",
+   "title": "Why I Stopped Day Trading Crypto", "duration": 840.0, "timestamp": 1758585600, "view_count": 25000,
+   "live_status": null}
+ ]
+}

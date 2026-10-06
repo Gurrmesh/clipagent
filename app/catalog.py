@@ -702,6 +702,29 @@ def _finish(segments: List[Dict[str, Any]], words: List[Dict[str, Any]]) -> Dict
             "text": " ".join(s["text"] for s in segments)}
 
 
+def _vtt_cues(text: str) -> List[Tuple[str, List[str]]]:
+    """(timing line, text lines) per cue. A cue ends at an empty line — YouTube's lines holding
+    a single space are part of the cue, not the end of it — or where the next cue begins
+    (a cue number standing before a timing line isn't text)."""
+    lines = (text or "").replace("﻿", "").splitlines()
+    cues: List[Tuple[str, List[str]]] = []
+    i = 0
+    while i < len(lines):
+        if "-->" not in lines[i]:
+            i += 1
+            continue
+        j = i + 1
+        body: List[str] = []
+        while j < len(lines) and lines[j] != "" and "-->" not in lines[j]:
+            body.append(lines[j])
+            j += 1
+        if j < len(lines) and "-->" in lines[j] and body:
+            body.pop()
+        cues.append((lines[i], body))
+        i = j
+    return cues
+
+
 def parse_vtt(text: str) -> Dict[str, Any]:
     """WebVTT → {"segments": [{start, end, text}], "words": [...]}.
 
@@ -713,17 +736,12 @@ def parse_vtt(text: str) -> Dict[str, Any]:
     segments: List[Dict[str, Any]] = []
     words: List[Dict[str, Any]] = []
     last = ""
-    blocks = re.split(r"\r?\n\s*\r?\n", (text or "").replace("﻿", ""))
-    for block in blocks:
-        lines = block.strip("\r\n").splitlines()
-        tline = next((i for i, ln in enumerate(lines) if "-->" in ln), None)
-        if tline is None:
-            continue
-        left, right = lines[tline].split("-->", 1)
+    for timing, body in _vtt_cues(text):
+        left, right = timing.split("-->", 1)
         start, end = _secs(left), _secs(right)
         if end - start < 0.05:
             continue                                   # a settle cue: repeats what's already on screen
-        raw = [ln for ln in lines[tline + 1:] if ln.strip()]
+        raw = [ln for ln in body if ln.strip()]
         shown = [(ln, _clean(ln)) for ln in raw]
         shown = [(ln, c) for ln, c in shown if c]
         while shown and shown[0][1] == last:

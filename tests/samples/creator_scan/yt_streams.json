@@ -1,0 +1,15 @@
+{
+ "id": "UCaaaaaaaaaaaaaaaaaaaaaa", "channel": "TJR", "title": "TJR - Live", "_type": "playlist",
+ "extractor": "youtube:tab", "webpage_url": "https://www.youtube.com/@TJRTrades/streams",
+ "entries": [
+  {"_type": "url", "ie_key": "Youtube", "id": "sssssssss01", "url": "https://www.youtube.com/watch?v=sssssssss01",
+   "title": "LIVE NY Session", "duration": 10800.0, "timestamp": 1759190400, "view_count": 60000,
+   "live_status": "was_live"},
+  {"_type": "url", "ie_key": "Youtube", "id": "sssssssss02", "url": "https://www.youtube.com/watch?v=sssssssss02",
+   "title": "LIVE NY Session", "duration": 10900.0, "timestamp": 1759276800, "view_count": 55000,
+   "live_status": "was_live"},
+  {"_type": "url", "ie_key": "Youtube", "id": "sssssssss03", "url": "https://www.youtube.com/watch?v=sssssssss03",
+   "title": "LIVE NY Session (tomorrow)", "duration": null, "release_timestamp": 1760000000,
+   "concurrent_view_count": 0, "live_status": "is_upcoming"}
+ ]
+}

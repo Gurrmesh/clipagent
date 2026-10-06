@@ -153,6 +153,9 @@ def _settings(form: Dict[str, Any]) -> Dict[str, Any]:
         "accent": form.get("accent", ""),
         "logo": bool(form.get("logo", False)),
         "logo_corner": form.get("logo_corner", "top-right"),
+        # a Creator Scan moment's job: Try again keeps making that one clip
+        **({"only_window": form["only_window"]} if isinstance(form.get("only_window"), dict) else {}),
+        **({"creator_scan": form["creator_scan"]} if isinstance(form.get("creator_scan"), dict) else {}),
     }
 
 

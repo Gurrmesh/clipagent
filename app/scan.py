@@ -1129,11 +1129,11 @@ def look_at_section(path: Path, start: float, end: float) -> Dict[str, Any]:
         from . import framing
         count = 8
         faces = framing.sample_faces(path, start, end, count=count)
-        times = {round(f.t, 2) for f in faces}
+        times = {round(float(f.t), 2) for f in faces}
         out["face_share"] = round(len(times) / count, 3)
-        sizes = sorted(max(f.w for f in faces if round(f.t, 2) == t) for t in times)
+        sizes = sorted(float(max(f.w for f in faces if round(float(f.t), 2) == t)) for t in times)
         out["face_size"] = round(sizes[len(sizes) // 2], 3) if sizes else 0.0
-        out["faces_max"] = max((sum(1 for f in faces if round(f.t, 2) == t) for t in times), default=0)
+        out["faces_max"] = int(max((sum(1 for f in faces if round(float(f.t), 2) == t) for t in times), default=0))
     except Exception as exc:  # noqa: BLE001 — no detector: say so, don't pretend
         out["face_note"] = f"Faces couldn't be looked for: {str(exc)[:120]}"
     return out
@@ -1371,6 +1371,7 @@ def _resume_later(creator_id: str, seconds: float) -> None:
 def settle_interrupted() -> None:
     """At startup: a scan cut off by a restart is paused with a plain note (Resume carries on);
     one that was waiting for the transcription allowance resumes by itself when its time comes."""
+    creators.init()
     now = NOW()
     for s in creators.scans_with_status(["running"]):
         creators.update_scan(s["id"], status="paused", wait_until=None, message=INTERRUPTED)
@@ -1778,6 +1779,13 @@ def _campaign_job_settings(campaign_id: str, settings: Dict[str, Any]) -> Dict[s
     return out
 
 
+def _campaign_of(settings: Dict[str, Any], creator: Dict[str, Any]) -> str:
+    """The campaign the clips or edit are for: the one asked for ("" = none), else the creator's."""
+    if "campaign_id" in settings:
+        return str(settings.get("campaign_id") or "")
+    return str(creator.get("campaign_id") or "")
+
+
 def _window(m: Dict[str, Any]) -> Dict[str, Any]:
     """The clip wanted from a job's source: section-relative times when the section is down,
     with `offset` saying where the section starts in the full video."""
@@ -1806,7 +1814,7 @@ def make_clips(moment_ids: Sequence[str], settings: Optional[Dict[str, Any]] = N
     job_ids = []
     for m in moments:
         creator = creators.get_creator(m["creator_id"]) or {}
-        camp_id = str(settings.get("campaign_id") or creator.get("campaign_id") or "")
+        camp_id = _campaign_of(settings, creator)
         js = _campaign_job_settings(camp_id, dict(base)) if camp_id else dict(base)
         js["only_window"] = _window(m)
         js["creator_scan"] = {"creator_id": m["creator_id"], "moment_id": m["id"], "catalog_id": m["catalog_id"]}
@@ -2002,7 +2010,7 @@ def make_edit(moment_ids: Sequence[str], settings: Optional[Dict[str, Any]] = No
     if st.get("needs_music") and not sound:
         raise ValueError(f"{edits._a(st['name'])} edit is cut to music — add or pick a song first")
     creator = creators.get_creator(moments[0]["creator_id"]) or {}
-    camp_id = str(settings.get("campaign_id") or creator.get("campaign_id") or "")
+    camp_id = _campaign_of(settings, creator)
     if camp_id and not store.get_campaign(camp_id):
         raise ValueError("That campaign doesn't exist any more")
     best = max(moments, key=lambda m: float(m.get("score") or 0))
@@ -2082,6 +2090,7 @@ def on_new_uploads(entries: Sequence[Dict[str, Any]]) -> Dict[str, int]:
     added: Dict[str, int] = {}
     if not entries:
         return added
+    creators.init()
     for creator in creators.list_creators():
         mine = [e for e in entries if any(catalog.same_channel(e.get("channel") or "", link)
                                           for link in creator["links"])]

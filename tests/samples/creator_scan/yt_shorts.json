@@ -1,0 +1,9 @@
+{
+ "id": "UCaaaaaaaaaaaaaaaaaaaaaa", "title": "TJR - Shorts", "_type": "playlist", "extractor": "youtube:tab",
+ "entries": [
+  {"_type": "url", "ie_key": "Youtube", "id": "hhhhhhhhh01", "url": "https://www.youtube.com/shorts/hhhhhhhhh01",
+   "title": "Never revenge trade", "duration": null, "view_count": 3100000},
+  {"_type": "url", "ie_key": "Youtube", "id": "hhhhhhhhh02", "url": "https://www.youtube.com/shorts/hhhhhhhhh02",
+   "title": "My first car", "duration": null, "view_count": 870000}
+ ]
+}

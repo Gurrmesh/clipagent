@@ -470,6 +470,12 @@ def scout() -> List[Dict[str, Any]]:
             url = v["url"] if v["url"].startswith("http") else f"https://www.youtube.com/watch?v={v['id']}"
             fresh.append({**v, "url": url, "channel": w["url"], "campaign_id": w.get("campaign_id", "")})
     save_settings(cfg)
+    if fresh:
+        try:                                   # a creator's channel: the new uploads join its catalog and get scanned
+            from . import scan
+            scan.on_new_uploads(fresh)
+        except Exception:
+            traceback.print_exc()
     for v in fresh[:5]:
         mins = f" · {int(v['duration'] // 60)} min" if v.get("duration") else ""
         notify.send(f"🆕 <b>New upload</b>{mins}\n{notify.esc(v['title'][:140])}\n{notify.esc(v['url'])}\n\n"

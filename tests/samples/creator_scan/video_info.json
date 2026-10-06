@@ -1,0 +1,40 @@
+{
+ "id": "aaaaaaaaaa1",
+ "title": "How I Made My First Million Trading",
+ "duration": 1250,
+ "upload_date": "20250801",
+ "timestamp": 1754006400,
+ "view_count": 912345,
+ "like_count": 30123,
+ "channel": "TJR",
+ "uploader_id": "@TJRTrades",
+ "webpage_url": "https://www.youtube.com/watch?v=aaaaaaaaaa1",
+ "live_status": "not_live",
+ "availability": "public",
+ "extractor": "youtube",
+ "heatmap": [
+  {"start_time": 0.0, "end_time": 12.5, "value": 1.0},
+  {"start_time": 12.5, "end_time": 25.0, "value": 0.62},
+  {"start_time": 25.0, "end_time": 37.5, "value": 0.41},
+  {"start_time": 37.5, "end_time": 50.0, "value": 0.55},
+  {"start_time": 50.0, "end_time": 62.5, "value": 0.3},
+  {"start_time": 62.5, "end_time": 75.0, "value": 0.88},
+  {"start_time": 75.0, "end_time": 87.5, "value": 0.25},
+  {"start_time": 87.5, "end_time": 1250.0, "value": 0.12}
+ ],
+ "subtitles": {},
+ "automatic_captions": {
+  "en-orig": [
+   {"ext": "json3", "url": "https://www.youtube.com/api/timedtext?v=aaaaaaaaaa1&lang=en&kind=asr&fmt=json3", "name": "English (Original)"},
+   {"ext": "srv1", "url": "https://www.youtube.com/api/timedtext?v=aaaaaaaaaa1&lang=en&kind=asr&fmt=srv1", "name": "English (Original)"},
+   {"ext": "vtt", "url": "https://www.youtube.com/api/timedtext?v=aaaaaaaaaa1&lang=en&kind=asr&fmt=vtt", "name": "English (Original)"}
+  ],
+  "en": [
+   {"ext": "json3", "url": "https://www.youtube.com/api/timedtext?v=aaaaaaaaaa1&lang=en&kind=asr&fmt=json3", "name": "English"},
+   {"ext": "vtt", "url": "https://www.youtube.com/api/timedtext?v=aaaaaaaaaa1&lang=en&kind=asr&fmt=vtt", "name": "English"}
+  ],
+  "fr": [
+   {"ext": "vtt", "url": "https://www.youtube.com/api/timedtext?v=aaaaaaaaaa1&lang=en&kind=asr&fmt=vtt&tlang=fr", "name": "French"}
+  ]
+ }
+}
