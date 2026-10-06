@@ -1201,9 +1201,13 @@ def campaign_fit(rules: Dict[str, Any], style: str) -> Tuple[Dict[str, bool], Li
     name = r["name"] or "This campaign"
     st = STYLES[style_key(style)]
     if not ok["stitch"]:
-        return {}, [], (f"{name}: the brief doesn't allow joining different moments, and an edit is made of several. "
-                        "If the brief allows it, switch “Join different moments” on in the campaign's rules — "
-                        "or make clips instead.")
+        said = campaign.explain(rules, "stitch")[1] == "brief"
+        return {}, [], (f"{name}: " + ("the brief doesn't allow joining different moments"
+                                       if said else "the brief doesn't say whether joining different moments is "
+                                                    "allowed, so it's off")
+                        + ", and an edit is made of several. If you're sure the brief allows it, open Campaigns → "
+                          f"{r['name'] or 'this campaign'} → Rules and set “Join different moments” to Allow — "
+                          "or make clips instead.")
     if not ok["crop"]:
         return {}, [], (f"{name}: the brief doesn't allow cropping the picture, and an edit is cut to vertical. "
                         "Make clips with the whole frame kept instead.")

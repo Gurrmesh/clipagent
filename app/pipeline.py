@@ -202,6 +202,15 @@ def job_rules(job: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return camp.get("rules") or None
 
 
+def _source_meta_of(job: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """What the download learned about the source (upload date, channel…) — {} when unknown."""
+    try:
+        meta = json.loads((job or {}).get("source_meta") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
 def _fit_length(clip: Dict[str, Any], lo: Optional[float], hi: Optional[float], duration: float) -> None:
     """Keep a clip inside a campaign's length limits after its edges were snapped."""
     if lo and clip["end"] - clip["start"] < lo:
@@ -223,7 +232,7 @@ def _gate_source(rb: Dict[str, Any], clip_id: str) -> None:
             "parts": json.loads(row.get("parts") or "[]")}
     result = compliance.check_source(rb, clip, edits, Path(row["file"]), post,
                                      edits.get("hook", "") if edits.get("hook_on", True) else "",
-                                     edits.get("tone"))
+                                     edits.get("tone"), source_meta=_source_meta_of(store.get_job(row["job_id"])))
     store.update_clip(clip_id, compliance=json.dumps(result))
 
 
@@ -456,6 +465,14 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
         fingerprint = source_fingerprint(source)
         store.update_job(job_id, title=title, source_path=str(source),
                          duration=info["duration"], source_hash=fingerprint)
+        if rules:
+            # A brief that only takes recent videos: an older one stops here,
+            # before any time goes into transcribing it. Unknown date: the clip
+            # check asks you to look instead.
+            refusal = campaign.too_old(rules, _source_meta_of(store.get_job(job_id)),
+                                       (settings.get("campaign") or {}).get("name", ""))
+            if refusal:
+                raise RuntimeError(refusal)
 
         if not info["has_audio"]:
             raise RuntimeError("That video has no audio track, so there is nothing to transcribe.")
@@ -604,6 +621,7 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
         if rules:
             platform = campaign.assign_platforms(rules, 1, settings.get("platforms") or [])[0]
             for i, clip in enumerate(clips):
+                clip["hook"] = campaign.fix_hook(rules, clip.get("hook", ""))   # a name the brief requires on screen
                 posts[i] = campaign.build_post(rules, i, platform, extra=clip.get("caption", ""),
                                                own_tags=clip.get("hashtags", []))
             _stage(job_id, "Checking hooks and captions against the brief", 75)
@@ -731,6 +749,7 @@ def rerender_overlay(clip_id: str, edits: Dict[str, Any]) -> Dict[str, Any]:
     hook = (edits.get("hook", current.get("hook", "")) or "").strip()[:120]
     if not campaign.allowed(rb, "hook"):
         hook = ""
+    hook = campaign.fix_hook(rb, hook)              # a name the brief requires on screen stays on
     tone = current.get("tone")
     if hook != current.get("hook", ""):
         tone = campaign.check_text(rb, [{"id": 0, "hook": hook, "extra": "",
