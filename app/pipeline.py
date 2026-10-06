@@ -354,6 +354,30 @@ def _variants_inside_pieces(clips: List[Dict[str, Any]], pieces: List[Tuple[floa
 LOOK_IDS = ("identity", "logos", "offensive", "ai_footage")      # the campaign look's checks
 
 
+def window_clip(window: Dict[str, Any], duration: float, settings: Dict[str, Any],
+                from_download: bool = False) -> Dict[str, Any]:
+    """The one clip a job asked for (`only_window`, e.g. a moment from Creator Scan), instead of
+    Claude finding moments. Times are on the source file's clock; when the run had to download
+    the full video instead of the moment's section, `offset` (where the section started) is added."""
+    shift = float(window.get("offset") or 0.0) if from_download else 0.0
+    start = max(0.0, float(window.get("start") or 0.0) + shift)
+    end = min(duration, float(window.get("end") or 0.0) + shift) if duration else float(window.get("end") or 0.0) + shift
+    lo, hi, _ = highlights.length_window(settings.get("min_len"), settings.get("max_len"),
+                                         settings.get("platforms") or None)
+    if end - start > hi:
+        end = start + hi
+    if end - start < lo:
+        end = min(duration or start + lo, start + lo)
+        start = max(0.0, min(start, end - lo))
+    kind = str(window.get("type") or "story")
+    return {"start": round(start, 2), "end": round(end, 2), "score": int(window.get("score") or 0),
+            "title": (str(window.get("title") or window.get("hook") or "") or "Picked moment")[:80],
+            "hook": str(window.get("hook") or "")[:70], "reason": str(window.get("reason") or "")[:300],
+            "tags": [str(window.get("kind") or kind)[:20]], "caption": "", "hashtags": [], "verdict": "post",
+            "type": kind if kind in highlights.CLIP_TYPES else "story", "needs_context": False,
+            "context_note": "", "headline": "", "rank": 1}
+
+
 def _gate_source(rb: Dict[str, Any], clip_id: str) -> None:
     """Check a rendered clip-from-source campaign clip and store the verdict."""
     row = store.get_clip(clip_id)
@@ -639,21 +663,27 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
         wav.unlink(missing_ok=True)
 
         # 4. Claude picks the moments, then ranks them all together -----------
-        _stage(job_id, "Claude is finding the moments", 62)
-        clips = highlights.find_highlights(
-            title=title, segments=_with_joins(result["segments"], pieces), duration=info["duration"],
-            peaks=peaks, want=want,
-            progress=lambda p: _stage(
-                job_id,
-                "Claude is finding the moments" if p < 80 else "Ranking them against each other",
-                62 + int(p * 0.13)),
-            min_len=settings.get("min_len"), max_len=settings.get("max_len"),
-            guidance=campaign.picker_guidance(rules) if rules else "",
-            platforms=settings.get("platforms") or None,
-            creator=lookcheck.rules_of(rules)["creator"] if rules else "",
-            # moments whose big burned-in words would force the whole picture rank a little lower
-            text_risk=(lambda a, b: textdetect.text_risk(source, a, b)) if settings.get("auto_frame", True) else None,
-        )
+        # (a job that names its one wanted clip — a Creator Scan moment — skips the picking)
+        window = settings.get("only_window") if isinstance(settings.get("only_window"), dict) else None
+        if window:
+            _stage(job_id, "Using the moment you picked", 62)
+            clips = [window_clip(window, info["duration"], settings, from_download=bool(url and not upload_path))]
+        else:
+            _stage(job_id, "Claude is finding the moments", 62)
+            clips = highlights.find_highlights(
+                title=title, segments=_with_joins(result["segments"], pieces), duration=info["duration"],
+                peaks=peaks, want=want,
+                progress=lambda p: _stage(
+                    job_id,
+                    "Claude is finding the moments" if p < 80 else "Ranking them against each other",
+                    62 + int(p * 0.13)),
+                min_len=settings.get("min_len"), max_len=settings.get("max_len"),
+                guidance=campaign.picker_guidance(rules) if rules else "",
+                platforms=settings.get("platforms") or None,
+                creator=lookcheck.rules_of(rules)["creator"] if rules else "",
+                # moments whose big burned-in words would force the whole picture rank a little lower
+                text_risk=(lambda a, b: textdetect.text_risk(source, a, b)) if settings.get("auto_frame", True) else None,
+            )
         if not clips:
             store.update_job(job_id, status="done", stage="No clip-worthy moments found",
                              progress=100)

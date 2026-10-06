@@ -1,0 +1,12 @@
+{
+ "_type": "playlist", "id": "tjr", "title": "tjr - Past Broadcasts sorted by Date", "extractor": "twitch:videos",
+ "extractor_key": "TwitchVideos", "webpage_url": "https://www.twitch.tv/tjr/videos?filter=archives&sort=time",
+ "entries": [
+  {"_type": "url_transparent", "ie_key": "TwitchVod", "id": "v2100000001",
+   "url": "https://www.twitch.tv/videos/2100000001", "title": "trading the open with chat",
+   "thumbnail": "https://static-cdn.jtvnw.net/cf_vods/x/thumb0-320x180.jpg", "duration": 2400.0, "view_count": 4100},
+  {"_type": "url_transparent", "ie_key": "TwitchVod", "id": "v2100000002",
+   "url": "https://www.twitch.tv/videos/2100000002", "title": "6 HOUR TRADING MARATHON",
+   "thumbnail": "https://static-cdn.jtvnw.net/cf_vods/y/thumb0-320x180.jpg", "duration": 21600.0, "view_count": 9800}
+ ]
+}

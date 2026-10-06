@@ -22,6 +22,9 @@ for _d in (SOURCE_DIR, AUDIO_DIR, CLIP_DIR, THUMB_DIR, WORK_DIR):
 # --- Models ---------------------------------------------------------------
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
+# Creator Scan reads a whole catalog: a cheaper, faster model can do the first
+# screening pass (e.g. a Haiku-class model). Unset = the main model.
+CLAUDE_SCREEN_MODEL = os.getenv("CLAUDE_SCREEN_MODEL", "").strip() or CLAUDE_MODEL
 
 # Whisper: defaults to OpenAI, can be pointed at Groq or any compatible host.
 WHISPER_API_KEY = os.getenv("WHISPER_API_KEY") or os.getenv("OPENAI_API_KEY", "")
@@ -36,6 +39,12 @@ MAX_SOURCE_MINUTES = int(os.getenv("MAX_SOURCE_MINUTES", "240"))
 LONG_SOURCE_KEEP_MINUTES = int(os.getenv("LONG_SOURCE_KEEP_MINUTES", "60"))
 # Whisper uploads cap at 25 MB, so audio is chunked below that.
 AUDIO_CHUNK_SECONDS = int(os.getenv("AUDIO_CHUNK_SECONDS", "900"))
+# Creator Scan: seconds between requests to YouTube (and the other sites). Never
+# below 4 — a scan makes hundreds of requests and must not get the PC blocked.
+try:
+    SCAN_REQUEST_GAP = max(4.0, float(os.getenv("SCAN_REQUEST_GAP", "4") or 4))
+except ValueError:
+    SCAN_REQUEST_GAP = 4.0
 
 RENDER_W, RENDER_H = 1080, 1920
 FPS = 30
