@@ -485,6 +485,21 @@ class _Run:
         self.counters = dict(scan.get("counters") or {})
         self.claude_trouble = 0
         self.notes: List[str] = list(self.counters.get("notes") or [])
+        # a scan of new uploads only touches those videos: a creator listed but never scanned
+        # (or one sharing the channel) isn't read in full because one new video arrived
+        self.only: List[str] = (list(self.counters.get("new_rows") or [])
+                                if self.counters.get("mode") == "new_uploads" else [])
+
+    def next_row(self, status: str, tried: set) -> Optional[Dict[str, Any]]:
+        if not self.only:
+            return creators.next_catalog(self.creator_id, status, exclude=tried)
+        for cat_id in self.only:
+            if cat_id in tried:
+                continue
+            row = creators.get_catalog(cat_id)
+            if row and row.get("status") == status:
+                return row
+        return None
 
     # -- pacing and status --
     def check(self) -> None:
@@ -585,11 +600,11 @@ class _Run:
 
     def stage_words(self) -> None:
         tried: set = set()
-        total = max(1, _counts(self.creator_id)["listed"])
+        total = max(1, len(self.only) if self.only else _counts(self.creator_id)["listed"])
         can_screen = _claude_ready()
         while True:
             self.check()
-            row = creators.next_catalog(self.creator_id, "listed", exclude=tried)
+            row = self.next_row("listed", tried)
             if not row:
                 break
             tried.add(row["id"])
@@ -599,11 +614,12 @@ class _Run:
             if row.get("status") == "words" and can_screen:
                 self.screen_one(row)
             c = _counts(self.creator_id)
-            self.progress("words", c["read"] / total)
+            self.progress("words", (len(tried) if self.only else c["read"]) / total)
             self.milestone(c)
 
     def stage_screen(self) -> None:
-        if not creators.catalog_counts(self.creator_id)["words"]:
+        if not creators.catalog_counts(self.creator_id)["words"] or \
+                (self.only and not any((creators.get_catalog(c) or {}).get("status") == "words" for c in self.only)):
             return
         if not _claude_ready():
             raise catalog.ScanStop("Finding the moments needs Claude — add ANTHROPIC_API_KEY to the .env file, "
@@ -611,7 +627,7 @@ class _Run:
         tried: set = set()
         while True:
             self.check()
-            row = creators.next_catalog(self.creator_id, "words", exclude=tried)
+            row = self.next_row("words", tried)
             if not row:
                 break
             tried.add(row["id"])
@@ -623,6 +639,9 @@ class _Run:
             self.notes.append("Ranking across the catalog needs Claude — the first scores are kept.")
             return
         kinds = [k for k in self.settings.get("kinds") or creators.KINDS if k in creators.KINDS]
+        if self.only:                                   # only the kinds the new videos brought
+            fresh = {m["kind"] for c in self.only for m in creators.list_moments(self.creator_id, catalog_id=c)}
+            kinds = [k for k in kinds if k in fresh]
         for i, kind in enumerate(kinds):
             self.check()
             self.say(f"Ranking the {kind} moments across the catalog")
@@ -641,11 +660,17 @@ class _Run:
         if top <= 0:
             return
         kinds = set(self.settings.get("kinds") or creators.KINDS)
-        have = creators.moment_counts(self.creator_id)["sections"]
-        want = max(0, top - have)
+        if self.only:                                   # the new videos' best few
+            want = min(top, 5 * len(self.only))
+            pool = sorted((m for c in self.only for m in creators.list_moments(self.creator_id, catalog_id=c,
+                                                                                 status="candidate")),
+                          key=lambda m: -float(m.get("score") or 0))
+        else:
+            want = max(0, top - creators.moment_counts(self.creator_id)["sections"])
+            pool = creators.list_moments(self.creator_id, status="candidate", limit=top * 3 + 30)
         if not want:
             return
-        pool = [m for m in creators.list_moments(self.creator_id, status="candidate", limit=top * 3 + 30)
+        pool = [m for m in pool
                 if m["kind"] in kinds and int((m.get("signals") or {}).get("fetch_tries") or 0) < MAX_FETCH_TRIES]
         pick = pool[:want]
         groups: Dict[str, List[Dict[str, Any]]] = {}
@@ -878,8 +903,9 @@ def guarded_download(net: catalog.Net, platform: str, url: str, fn: Callable[[],
     except Exception as exc:  # noqa: BLE001 — sorted into plain kinds
         text = str(exc)
         kind = catalog.classify(text)
-        if kind == "bot":
-            message = media.explain_download_error(text, url)
+        part1_block = getattr(media, "BotBlocked", None)
+        if kind == "bot" or (isinstance(part1_block, type) and isinstance(exc, part1_block)):
+            message = text if "blocking downloads" in text.lower() else media.explain_download_error(text, url)
             catalog.set_bot_block(message, platform)
             raise catalog.BotBlocked(message) from exc
         if kind == "rate":
@@ -2060,7 +2086,8 @@ def _build_edit(eid: str, moment_ids: List[str], settings: Dict[str, Any], camp_
         store.update_edit(eid, settings=clean, plan=plan, status="queued", stage="Waiting")
         edits.run(eid, True)
     except Exception as exc:  # noqa: BLE001 — stored on the edit in plain words
-        traceback.print_exc()
+        if not isinstance(exc, ValueError):          # a ValueError is already a plain refusal (e.g. the brief)
+            traceback.print_exc()
         store.update_edit(eid, status="failed", stage="Failed", progress=100, error=str(exc)[:400])
 
 

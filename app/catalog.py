@@ -74,7 +74,7 @@ class FetchFailed(Exception):
 
 def classify(text: str) -> str:
     t = (text or "").lower()
-    if "sign in to confirm" in t or "not a bot" in t:
+    if "sign in to confirm" in t or "not a bot" in t or "blocking downloads from this pc" in t:
         return "bot"
     if "http error 429" in t or "too many requests" in t or " 429" in t:
         return "rate"

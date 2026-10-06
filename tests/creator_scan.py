@@ -109,7 +109,8 @@ def fake_sections(url, sections, out_dir, pad=8.0, progress=None):
         src = BLACK if vid in BLACK_VIDEOS else FOOTAGE
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-stream_loop", "-1", "-i", str(src), "-t",
                         f"{(e + pad) - a:.2f}", "-c", "copy", str(path)], check=True)
-        out.append({"path": path, "start": s, "end": e, "offset": a})
+        out.append({"path": path, "start": s, "end": e, "offset": a, "duration": round((e + pad) - a, 3),
+                    "index": len(out)})
     return out
 
 
@@ -285,6 +286,7 @@ def screen_answer(kw):
 
 def rank_answer(kw):
     text = kw["messages"][0]["content"]
+    kind = text.split(" moments", 1)[0].split()[-1]
     out = []
     for m in re.finditer(r"\[(\d+)\] “([^”]*)”[^\n]*\n\s+([^\n]*)", text):
         i, title, said = int(m.group(1)), m.group(2), m.group(3)
@@ -297,7 +299,7 @@ def rank_answer(kw):
             score = 60 if first else 50
         hook = "His first million came in 2019" if first else (
             "He made $5 million in one day" if "40,000" in said and title.startswith("How") else "Bro bought the top again")
-        out.append({"id": i, "score": score, "story_key": "First Million" if first else f"{title}-{i}",
+        out.append({"id": i, "score": score, "story_key": "First Million" if first else f"{kind}-{title}-{i}",
                     "hook": hook, "why": "test"})
     return {"moments": out}
 
@@ -833,6 +835,11 @@ new_row = next((r for r in creators.list_catalog(cid) if r["video_id"] == "aaaaa
 expect(fresh and new_row and new_row["status"] == "done", "the new upload joined the catalog and was read")
 expect(nu["status"] == "done" and (nu["counters"] or {}).get("mode") == "new_uploads", "a short scan of just the new ones")
 expect(sum(1 for c in RUNNER.calls if c[1].endswith("/videos")) == list_calls, "the channel isn't listed all over again")
+wait_scan(est_id)
+est_rows = creators.list_catalog(est_id)
+expect(next(r for r in est_rows if r["video_id"] == "aaaaaaaaa10")["status"] == "done" and
+       all(r["status"] in ("listed", "skipped") for r in est_rows if r["video_id"] != "aaaaaaaaa10"),
+       "a creator sharing the channel but never scanned: only the new video is read, not its whole catalog")
 texts = [m["text"] for m in drain() if m["kind"] == "text"]
 expect(any("new moment" in t and "want clips? Open Creators" in t for t in texts),
        f"Telegram: N new moments … want clips? ({[t for t in texts if 'new moment' in t][:1]})")
@@ -859,7 +866,6 @@ expect(creators.list_moments(cid, kind="story") and all(m["kind"] == "story" for
        "moments filtered by kind")
 expect(all(m["status"] != "dropped" for m in creators.list_moments(cid)), "dropped moments are left out by default")
 gm = creators.list_moments(cid, q="gamblers")
-print("DEBUG", [(m["kind"], m["status"], m["text"][:60], m["hook"], m["reason"]) for m in gm][:5])
 expect(gm and all("gamblers" in m["text"].lower() for m in gm), "moments searched by their words")
 sec_files = [m["section_path"] for m in creators.list_moments(cid, status="all", limit=1000) if m.get("section_path")]
 creators.delete_creator(empty)
