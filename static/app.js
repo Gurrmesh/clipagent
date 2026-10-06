@@ -837,7 +837,9 @@ function buildLayoutChips() {
   }));
 }
 function toggleFraming(layout) {
-  const resolved = layout !== 'auto' ? layout : (currentClip?.framing?.kind === 'facecam' ? 'split' : 'fill');
+  // Auto shows the controls for what the last render actually used (a facecam split, the whole picture…)
+  const fr = currentClip?.framing || {};
+  const resolved = layout !== 'auto' ? layout : (fr.layout || (fr.kind === 'facecam' ? 'split' : 'fill'));
   $('ed-cropwrap').classList.toggle('hidden', resolved !== 'fill');
   $('ed-camwrap').classList.toggle('hidden', resolved !== 'split');
 }
@@ -904,7 +906,7 @@ async function openEditor(clip, panel = 'ask') {
   $('ed-text').value = (clip.words || []).map(w => w.w).join(' ');
   $('ed-framenote').textContent = clip.framing?.note || '';
   $('ed-savednote').textContent = clip.saved > 0 ? `The last render cut ${clip.saved.toFixed(1)} s of dead air.` : '';
-  const cam = e.facecam || { x: 0, y: 0, w: .28, h: .30 };
+  const cam = (e.facecam_manual && e.facecam) || clip.framing?.facecam || e.facecam || { x: 0, y: 0, w: .28, h: .30 };
   $('cam-x').value = Math.round(cam.x * 100); $('cam-y').value = Math.round(cam.y * 100);
   $('cam-w').value = Math.round(cam.w * 100); $('cam-h').value = Math.round(cam.h * 100);
   ['cam-x', 'cam-y', 'cam-w', 'cam-h'].forEach(id => delete $(id).dataset.touched);

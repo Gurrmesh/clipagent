@@ -1363,17 +1363,23 @@ def _hook_clear_top(cam: "Camera", an: Analysis, tl: Timeline, size: Tuple[int, 
     if not eyes and not words:
         return None
 
-    def clear(t: float) -> bool:
-        return (all(t + block <= e or t >= c for e, c in zip(eyes, chins))
-                and all(t + block <= y0 - 10 or t >= y1 + 10 for y0, y1 in words))
+    def cost(t: float) -> float:
+        """How much it covers: eyes count three times, the creator's own words once."""
+        over = lambda a, b: max(0.0, min(t + block, b) - max(t, a))  # noqa: E731
+        return (3 * max([over(e, c) for e, c in zip(eyes, chins)] or [0.0])
+                + max([over(y0 - 10, y1 + 10) for y0, y1 in words] or [0.0]))
 
-    if clear(top):                                       # it only covers hair and forehead: fine
+    if cost(top) == 0:                                   # it only covers hair and forehead: fine
         return None
     stop = captions.CAPTION_TOP if limit is None else limit
-    for t in sorted({int(c + 40) for c in chins} | {int(y1 + 24) for _, y1 in words}):
-        if t > top and t + block <= stop and clear(t):
+    spots = sorted({int(c + 40) for c in chins} | {int(y1 + 24) for _, y1 in words})
+    spots = [t for t in spots if t > top and t + block <= stop]
+    for t in spots:
+        if cost(t) == 0:
             return t
-    return None
+    # nowhere is clear: the spot covering least, if it beats where it is
+    best = min(spots, key=cost, default=None)
+    return best if best is not None and cost(best) < cost(top) else None
 
 
 def _split_hook_top(cam: "Camera", an: Analysis, tl: Timeline, size: Tuple[int, int], base: Dict[str, Any],

@@ -224,8 +224,8 @@ def _is_text(f: Dict[str, float]) -> bool:
         return False
     if f["aspect"] < 0.3 or f["solid"] > 0.97 or f["grey_std"] > 24 or f["density"] < 0.35:
         return False                                   # thin solid bars: book spines, stripes
-    if f["n"] >= 4 and f["w_cv"] < 0.09 and f["h_cv"] < 0.06 and f["gap_cv"] < 0.25:
-        return False                                   # evenly repeating: a stripe pattern, a fence
+    if f["n"] >= 5 and f["w_cv"] < 0.09 and f["h_cv"] < 0.06 and f["gap_cv"] < 0.25 and f["solid"] > 0.88:
+        return False                                   # evenly repeating solid shapes: stripes, a fence
     return True
 
 
@@ -264,19 +264,20 @@ def _blocks(lines: List[Dict[str, float]]) -> List[Dict[str, float]]:
             for j in range(i + 1, len(blocks)):
                 a, b = blocks[i], blocks[j]
                 cap = max(a["cap"], b["cap"])
-                if cap / max(1.0, min(a["cap"], b["cap"])) > 1.9:
+                # The same words found twice — the fill of outlined letters, and the dark outline
+                # around them, which is taller: one block, and the fill has the true letter height.
+                ix = min(a["x1"], b["x1"]) - max(a["x0"], b["x0"])
+                iy = min(a["y1"], b["y1"]) - max(a["y0"], b["y0"])
+                small = min((a["x1"] - a["x0"]) * (a["y1"] - a["y0"]), (b["x1"] - b["x0"]) * (b["y1"] - b["y0"]))
+                same_text = ix > 0 and iy > 0 and ix * iy > 0.5 * small
+                if not same_text and cap / max(1.0, min(a["cap"], b["cap"])) > 1.9:
                     continue
                 vgap = max(a["y0"], b["y0"]) - min(a["y1"], b["y1"])
                 hgap = max(a["x0"], b["x0"]) - min(a["x1"], b["x1"])
                 same_row = vgap < -0.5 * min(a["y1"] - a["y0"], b["y1"] - b["y0"]) and hgap < 1.8 * cap
                 stacked = vgap < 0.9 * cap and hgap < 1.0 * cap
-                if same_row or stacked:
-                    # The same words found twice — the fill of outlined letters, and the dark outline
-                    # around them, which is taller: the fill has the true letter height.
-                    ix = min(a["x1"], b["x1"]) - max(a["x0"], b["x0"])
-                    iy = min(a["y1"], b["y1"]) - max(a["y0"], b["y0"])
-                    small = min((a["x1"] - a["x0"]) * (a["y1"] - a["y0"]), (b["x1"] - b["x0"]) * (b["y1"] - b["y0"]))
-                    if ix > 0 and iy > 0 and ix * iy > 0.5 * small:
+                if same_text or same_row or stacked:
+                    if same_text:
                         cap = min(a["cap"], b["cap"])
                     blocks[i] = {"x0": min(a["x0"], b["x0"]), "y0": min(a["y0"], b["y0"]),
                                  "x1": max(a["x1"], b["x1"]), "y1": max(a["y1"], b["y1"]),
@@ -501,6 +502,8 @@ def fit_window(cx: np.ndarray, cy: np.ndarray, zoom: np.ndarray, cw: float, ch: 
                   & (cy[k] - hh0[k] <= F[:, 2] + 0.25 * (F[:, 4] - F[:, 2])) & (F[:, 4] <= cy[k] + hh0[k] + 1))
         F = F[inside]
     fk = F[:, 0].astype(int)
+    # a face whose forehead the planned crop already trimmed may keep that trim; any other keeps its top
+    allow = np.where(F[:, 2] < cy[fk] - hh0[fk], 0.25, 0.0) if len(F) else np.zeros(0)
     checked = len(np.unique(fk))
 
     best = None
@@ -545,7 +548,7 @@ def fit_window(cx: np.ndarray, cy: np.ndarray, zoom: np.ndarray, cw: float, ch: 
             # the faces it had must stay well framed: wholly inside, not jammed against a side
             pad = 0.04 * 2 * hw[fk]
             out = ((F[:, 1] < nx[fk] - hw[fk] + pad) | (F[:, 3] > nx[fk] + hw[fk] - pad)
-                   | (F[:, 2] + 0.25 * (F[:, 4] - F[:, 2]) < ny[fk] - hh[fk]) | (F[:, 4] > ny[fk] + hh[fk] + 1))
+                   | (F[:, 2] + allow * (F[:, 4] - F[:, 2]) < ny[fk] - hh[fk]) | (F[:, 4] > ny[fk] + hh[fk] + 1))
             if len(np.unique(fk[out])) > 0.1 * checked:
                 continue
         moved = float(np.mean(np.abs(nx - cx)) / cw + np.mean(np.abs(ny - cy)) / ch

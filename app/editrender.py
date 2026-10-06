@@ -218,6 +218,73 @@ def look_at(src: Source, start: float, end: float, count: int = 4) -> Dict[str, 
             "std": float(np.mean(stds)) if stds else 50.0}
 
 
+EDIT_ZOOM = 1.15                  # a punch-in this deep must not cut the words either
+
+
+def frame_moment(src: Source, look: Dict[str, Any], start: float, end: float) -> Dict[str, Any]:
+    """Where this moment's 9:16 window sits so the creator's burned-in words are never cut in half:
+    centred on the face, moved to keep a title whole (or tightened to leave it out) — or, when
+    neither works, the whole picture over a blurred copy of itself ("whole"). Zoom limits keep the
+    punch-ins and push-ins from cutting the words either. Returns {"cx", "cy", "zmin", "zmax",
+    "whole", "note"} (source px)."""
+    from . import motion, textdetect
+    s = max(OW / src.w, OH / src.h)
+    ww, wh = OW / s, OH / s
+    cx = min(max(look["cx"], ww / 2), src.w - ww / 2)
+    cy = min(max(look["cy"], wh / 2), src.h - wh / 2)
+    out = {"cx": cx, "cy": cy, "zmin": 1.0, "zmax": 9.0, "whole": False, "note": ""}
+    regions = textdetect.find_regions(src.path, [(start, end)])
+    if not regions:
+        return out
+    boxes = [(r.x0 * src.w, r.y0 * src.h, r.x1 * src.w, r.y1 * src.h) for r in regions]
+    m = textdetect.MARGIN * src.w
+    widest = max(regions, key=lambda r: r.w)
+    what, verb = motion._what(widest)
+    face = None
+    if look.get("found"):
+        fh = look["face_h"]
+        face = np.array([(0, look["cx"] - 0.42 * fh, look["cy"] - 0.5 * fh, look["cx"] + 0.42 * fh, look["cy"] + 0.5 * fh)])
+    if not any(textdetect.cuts(np.array([cx]), np.array([cy]), np.array([ww / 2 / z]), np.array([wh / 2 / z]), b, m).any()
+               for b in boxes for z in (1.0, EDIT_ZOOM)):
+        return out
+    got = textdetect.fit_window(np.array([cx]), np.array([cy]), np.array([1.0]), ww, wh, src.w, src.h, boxes, face,
+                                max_zoom=motion.TEXT_MAX_ZOOM, margin=m)
+    if got is not None:
+        nx, ny = float(got["cx"][0]), float(got["cy"][0])
+        zmin, zmax = float(got["zoom"][0]), 9.0              # left out at zmin stays out closer in
+        for mode, (x0, y0, x1, y1) in zip(got["modes"], boxes[:3]):
+            if mode == "in":                # a block kept inside: the zoom about the centre must not push it out
+                for d, half in ((nx - x0 + m, ww / 2), (x1 + m - nx, ww / 2), (ny - y0 + m, wh / 2), (y1 + m - ny, wh / 2)):
+                    zmax = min(zmax, half / max(1.0, d))
+        out.update(cx=nx, cy=ny, zmin=zmin, zmax=max(zmin, zmax),
+                   note=(f"Moved the frame so {what} {verb} cut off." if all(md == "in" for md in got["modes"])
+                         else f"Kept {what} out of the frame, so no half-cut words show."))
+        return out
+    out.update(whole=True, note=f"Showed the whole picture because of {what} — a vertical crop would cut its words in half.")
+    # the whole picture sits full width in the middle; the punch-ins may not push the words off its edges
+    sf = OW / src.w
+    out["boxes_out"] = [(b[0] * sf, (OH - src.h * sf) / 2 + b[1] * sf, b[2] * sf, (OH - src.h * sf) / 2 + b[3] * sf)
+                        for b in boxes]
+    out["zmax"] = motion._zoom_cap(out["boxes_out"]) or 9.0
+    return out
+
+
+def whole_canvas(img: np.ndarray, cache: Dict[str, Any]) -> np.ndarray:
+    """The whole picture full width over a blurred, darker copy of itself, as a 1080x1920 frame."""
+    import cv2
+    h, w = img.shape[:2]
+    sb = max(OW / w, OH / h)
+    small = cv2.resize(img, (max(1, int(w * sb / 8)), max(1, int(h * sb / 8))), interpolation=cv2.INTER_AREA)
+    bw, bh = small.shape[1], small.shape[0]
+    x0, y0 = (bw - OW // 8) // 2, (bh - OH // 8) // 2
+    bg = cv2.GaussianBlur(small[max(0, y0):max(0, y0) + OH // 8, max(0, x0):max(0, x0) + OW // 8], (0, 0), 5)
+    canvas = cv2.convertScaleAbs(cv2.resize(bg, (OW, OH), interpolation=cv2.INTER_LINEAR), alpha=0.82)
+    fh = int(round(h * OW / w))
+    top = (OH - fh) // 2
+    canvas[top:top + fh] = cv2.resize(img, (OW, fh), interpolation=cv2.INTER_AREA)
+    return canvas
+
+
 def _curve(x: np.ndarray, contrast: float) -> np.ndarray:
     """An S-curve around mid-grey: contrast 0 = none."""
     if not contrast:
@@ -803,13 +870,25 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
             looks = {m: f.result() for m, f in futures.items()}
         target = match_target(list(looks.values()))
         luts = {m: grade_lut(tl.get("grade") or "none", lk, target) for m, lk in looks.items()}
+        # where each moment's window goes, so the creator's burned-in words are never cut
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {m: pool.submit(frame_moment, sources[sid], looks[m], a, b) for m, (sid, a, b) in spans.items()}
+            framed = {m: f.result() for m, f in futures.items()}
+        frame_notes = list(dict.fromkeys(fm["note"] for fm in framed.values() if fm["note"]))
         first = looks[segs[0]["moment"]]
 
         # where the first shot's face sits on screen, so the hook stays off it (hair included)
         face = None
         if first["found"]:
             src0 = sources[segs[0]["source"]]
-            M = affine(src0.w, src0.h, first["cx"], first["cy"], float(segs[0].get("zoom") or 1.0), 0, 0, 0)
+            fm0 = framed[segs[0]["moment"]]
+            z0 = float(segs[0].get("zoom") or 1.0)
+            if fm0["whole"]:                        # the picture sits full width in the middle of the canvas
+                k = OW / src0.w
+                M = affine(OW, OH, OW / 2, OH / 2, z0, 0, 0, 0)
+                M = np.array([[M[0, 0] * k, 0, M[0, 2]], [0, M[1, 1] * k, M[1, 1] * (OH - src0.h * k) / 2 + M[1, 2]]])
+            else:
+                M = affine(src0.w, src0.h, fm0["cx"], fm0["cy"], z0, 0, 0, 0)
             cy_out = M[1, 0] * first["cx"] + M[1, 1] * first["cy"] + M[1, 2]
             face = {"top": cy_out - first["face_h"] * 0.85 * M[1, 1],
                     "bottom": cy_out + first["face_h"] * 0.55 * M[1, 1]}
@@ -869,13 +948,17 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
                 f_first = max(0, int(math.floor(a * fpsf)) - 2)
                 count = int(math.ceil((b - a) * fpsf)) + 6
                 look = looks[g0["moment"]]
+                fm = framed[g0["moment"]]
                 # read only the columns the 9:16 window can reach (with room for zoom-outs and shake)
-                win = int(min(src.w, src.h * 9 / 16 * 1.12 + 40))
+                win = src.w if fm["whole"] else int(min(src.w, src.h * 9 / 16 * 1.12 + 40))
                 win -= win % 2
-                x0 = int(min(max(0, look["cx"] - win / 2), src.w - win))
+                x0 = int(min(max(0, fm["cx"] - win / 2), src.w - win))
                 x0 -= x0 % 2
                 reader = Reader(src, f_first, count, (x0, win))
-                cx, cy = look["cx"] - x0, look["cy"]
+                cx, cy = fm["cx"] - x0, fm["cy"]
+                src_h = src.h
+                if fm["whole"]:                     # the whole picture over a blurred copy: a 1080x1920 canvas
+                    win, src_h, cx, cy = OW, OH, OW / 2, OH / 2
                 lut = luts[g0["moment"]]
                 try:
                     for si in group:
@@ -898,10 +981,13 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
                                 img = cv2.addWeighted(reader.get(k - 1), 0.5, reader.get(k), 0.5, 0)
                             else:
                                 img = reader.get(int(round(f)))
+                            if fm["whole"]:
+                                img = whole_canvas(img, {})
                             z = zoom_at(s, t, style, fx)
                             sx, sy, rot = shake_at(s, t, style)
                             if sx or sy:
                                 z *= 1.0 + 2.2 * (abs(sx) + abs(sy)) / OW      # never show past the picture's edge
+                            z = min(max(z, fm["zmin"]), fm["zmax"])           # burned-in words stay whole
                             vec = s.get("blur_vec") or None
                             frames_blur = 3 if vec else 2           # a streak along the motion, or a light zoom blur
                             if s.get("blur_in") and t < frames_blur / FPS:
@@ -910,10 +996,10 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
                                 for j in range(5):
                                     v = (j / 4 - 0.5) * strength
                                     if vec:
-                                        M = affine(win, src.h, cx, cy, z, rot, sx + vec[0] * v * 1.6,
+                                        M = affine(win, src_h, cx, cy, z, rot, sx + vec[0] * v * 1.6,
                                                    sy + vec[1] * v * 1.6)
                                     else:
-                                        M = affine(win, src.h, cx, cy, z * (1 + 0.045 * (v + 0.5)), rot, sx, sy)
+                                        M = affine(win, src_h, cx, cy, z * (1 + 0.045 * (v + 0.5)), rot, sx, sy)
                                     mats.append(M)
                                 acc = np.zeros((OH // 2, OW // 2, 3), np.float32)
                                 for M in mats:
@@ -923,7 +1009,7 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
                                 out = cv2.resize(cv2.convertScaleAbs(acc, alpha=1 / len(mats)), (OW, OH),
                                                  interpolation=cv2.INTER_LINEAR)
                             else:
-                                M = affine(win, src.h, cx, cy, z, rot, sx, sy)
+                                M = affine(win, src_h, cx, cy, z, rot, sx, sy)
                                 out = cv2.warpAffine(img, M, (OW, OH), flags=cv2.INTER_LINEAR,
                                                      borderMode=cv2.BORDER_REFLECT101)
                             if any(0 <= t - g < GLITCH_SECONDS for g in s["glitches"]):
@@ -964,7 +1050,8 @@ def render(timeline: Dict[str, Any], sources_by_id: Dict[str, Dict[str, Any]], s
         at = min(L - 0.1, (tl.get("drop_at") or L / 3) + 0.15)
         subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{max(0.0, at):.2f}",
                         "-i", str(out_path), "-frames:v", "1", "-q:v", "3", str(thumb_path)], capture_output=True)
-        return {"length": N / FPS, "frames": written, "seconds": round(time.time() - started, 1)}
+        return {"length": N / FPS, "frames": written, "seconds": round(time.time() - started, 1),
+                "notes": frame_notes, "framing": {m: {k: v for k, v in fm.items() if k != "boxes_out"} for m, fm in framed.items()}}
     finally:
         import shutil
         shutil.rmtree(work, ignore_errors=True)

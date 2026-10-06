@@ -197,6 +197,7 @@ def find_highlights(
     max_len: float | None = None,
     guidance: str = "",
     platforms: List[str] | None = None,
+    text_risk=None,
 ) -> List[Dict[str, Any]]:
     """Run Claude over the transcript in blocks and return merged, ranked clips.
 
@@ -262,7 +263,7 @@ def find_highlights(
     if progress:
         progress(100)
 
-    return rank(found, peaks, duration, want, lo, hi)
+    return rank(found, peaks, duration, want, lo, hi, text_risk=text_risk)
 
 
 def _num(value: Any, default: float) -> float:
@@ -290,8 +291,12 @@ def rank(
     want: int,
     min_len: float = MIN_LEN,
     max_len: float = MAX_LEN,
+    text_risk=None,
 ) -> List[Dict[str, Any]]:
-    """Clean up boundaries, blend in audio energy, drop overlaps, sort."""
+    """Clean up boundaries, blend in audio energy, drop overlaps, sort.
+
+    `text_risk(start, end) -> (0..1, reason)`, when given, lowers a little the moments where big
+    words burned into the video would force the clip to show the whole picture."""
     cleaned: List[Dict[str, Any]] = []
     for clip in clips:
         if not isinstance(clip, dict):
@@ -332,6 +337,8 @@ def rank(
         })
 
     cleaned.sort(key=lambda c: c["score"], reverse=True)
+    if text_risk is not None:
+        _text_penalty(cleaned, text_risk, want)
     kept: List[Dict[str, Any]] = []
     for clip in cleaned:
         if any(clip["start"] < k["end"] - 1 and clip["end"] > k["start"] + 1 for k in kept):
@@ -343,6 +350,29 @@ def rank(
     for n, clip in enumerate(kept, 1):
         clip["rank"] = n
     return kept
+
+
+TEXT_PENALTY = 8          # at most this many points off a moment whose burned-in words block a vertical crop
+TEXT_BUDGET = 12.0        # seconds spent looking, at most (the moments near the cut line first)
+
+
+def _text_penalty(cleaned: List[Dict[str, Any]], text_risk, want: int) -> None:
+    """A light nudge, in place: the best moments (and a few behind them) lose up to TEXT_PENALTY
+    points when big burned-in words would make the clip show the whole picture, then re-sort.
+    Never raises; moments it had no time to look at keep their score."""
+    import time
+    started = time.time()
+    for clip in cleaned[:want + 4]:
+        if time.time() - started > TEXT_BUDGET:
+            break
+        try:
+            risk, why = text_risk(clip["start"], clip["end"])
+        except Exception:
+            continue
+        if risk > 0:
+            clip["score"] = max(0, clip["score"] - int(round(TEXT_PENALTY * min(1.0, float(risk)))))
+            clip["text_note"] = why
+    cleaned.sort(key=lambda c: c["score"], reverse=True)
 
 
 SENTENCE_END = re.compile(r"[.!?…][\"'”’)\]]*$")
