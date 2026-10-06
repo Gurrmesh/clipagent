@@ -228,19 +228,17 @@ expect(peak[1] in range(195, 205) and 8 <= abs(peak[0] - peak[1]) <= 18 and (pea
 print("== big words stay off his face (drawn faces high and low in the frame)")
 high = TMP / "face_high.mp4"                  # portrait, his face about a third of the way down
 low = TMP / "face_low.mp4"                    # the same kind of shot moved down: his face just below the middle
-subprocess.run([sys.executable, str(ROOT / "tools" / "make_test_footage.py"), "30", str(high), "--portrait",
+subprocess.run([sys.executable, str(ROOT / "tools" / "make_test_footage.py"), "26", str(high), "--portrait",
                 "--seed", "2"], check=True)
-subprocess.run([sys.executable, str(ROOT / "tools" / "make_test_footage.py"), "30", str(TMP / "raw_low.mp4"),
+subprocess.run([sys.executable, str(ROOT / "tools" / "make_test_footage.py"), "26", str(TMP / "raw_low.mp4"),
                 "--portrait", "--seed", "5"], check=True)
 ff("-i", str(TMP / "raw_low.mp4"), "-vf", "crop=1080:1360:0:0,pad=1080:1920:0:560:color=0x46505c",
    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy", str(low))
 face_src = {"H": {"source_path": str(high)}, "L": {"source_path": str(low)}}
 talk = {k: [{"w": w, "start": round(1.0 + i * 0.42, 2), "end": round(1.3 + i * 0.42, 2)}
             for i, w in enumerate(("stay hungry and never stop because the work you put in today pays you "
-                                   "back for years so keep going ") * 6)]
+                                   "back for years so keep going ") * 6).split()]
         for k in ("H", "L")}
-for k in talk:
-    talk[k] = [dict(w, w=w["w"]) for w in talk[k]]
 captured = {}
 _real_build_ass = editrender.build_ass
 
@@ -255,20 +253,24 @@ def keep_ass(tl_, out_, face_=None):
 editrender.build_ass = keep_ass
 
 
-def frames_of(path, w=540, h=960, vf=""):
-    """Every frame of a video at w×h (BGR), one at a time."""
-    proc = subprocess.Popen(["ffmpeg", "-v", "error", "-i", str(path), "-vf", (vf + "," if vf else "") +
-                             f"scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], stdout=subprocess.PIPE)
+def frames_of(inputs, vf="", w=540, h=960):
+    """Every frame (BGR, w×h) of what ffmpeg reads from `inputs`, one at a time."""
+    proc = subprocess.Popen(["ffmpeg", "-v", "error", *inputs, "-vf", (vf + "," if vf else "") + f"scale={w}:{h}",
+                             "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL)
     size = w * h * 3
-    while True:
-        buf = proc.stdout.read(size)
-        if len(buf) < size:
-            break
-        yield np.frombuffer(buf, np.uint8).reshape(h, w, 3)
-    proc.wait()
+    try:
+        while True:
+            buf = proc.stdout.read(size)
+            if len(buf) < size:
+                break
+            yield np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+    finally:
+        proc.kill()
+        proc.wait()
 
 
-def words_vs_face(video, tl_, ass_text, name, look_at_s=()):
+def words_vs_face(video, tl_, ass_text, name):
     """Every frame with words on screen: where libass drew them (the words alone, on grey) against
     the face the finder sees in the finished video. Returns (frames checked, frames where they overlap,
     frames with words but no face found)."""
@@ -277,10 +279,8 @@ def words_vs_face(video, tl_, ass_text, name, look_at_s=()):
     ass_file = TMP / f"{name}.ass"
     ass_file.write_text(ass_text, encoding="utf-8")
     from app import motion
-    grey = TMP / f"{name}_words.mp4"
-    ff("-f", "lavfi", "-i", f"color=c=0x808080:s=1080x1920:r=30:d={tl_['length']:.3f}", "-vf",
-       f"subtitles='{motion._escape(ass_file)}':fontsdir='{motion._escape(editrender.FONTS_DIR)}'",
-       "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", str(grey))
+    grey = ["-f", "lavfi", "-i", f"color=c=0x808080:s=540x960:r=30:d={tl_['length']:.3f}"]   # the words alone
+    grey_vf = f"subtitles='{motion._escape(ass_file)}':fontsdir='{motion._escape(editrender.FONTS_DIR)}'"
     skip = set()                                   # flashes and dips: the finder can't see a face in white or black
     for s in tl_["segments"]:
         for f0 in s["flashes"]:
@@ -289,8 +289,8 @@ def words_vs_face(video, tl_, ass_text, name, look_at_s=()):
             skip.update(range(int(s["at"] * 30), int((s["at"] + 0.2) * 30) + 1))
         if s.get("dip_out"):
             skip.update(range(int((s["at"] + s["dur"] - 0.2) * 30), int((s["at"] + s["dur"]) * 30) + 1))
-    checked, overlap, no_face, worst = 0, [], 0, None
-    for n, (img, words) in enumerate(zip(frames_of(video), frames_of(grey))):
+    checked, overlap, no_face = 0, [], 0
+    for n, (img, words) in enumerate(zip(frames_of(["-i", str(video)]), frames_of(grey, grey_vf))):
         if n % 2 or n in skip:
             continue
         ink = np.abs(words.astype(np.int16) - 128).max(axis=2) > 10
@@ -311,17 +311,15 @@ def words_vs_face(video, tl_, ass_text, name, look_at_s=()):
             if bx0 < fx1 and bx1 > fx0 and by0 < fy1 and by1 > fy0:
                 overlap.append(round(n / 30, 2))
                 break
-        if n / 30 in look_at_s or (worst is None and len(bands) and n > 30):
-            worst = n
-    return checked, overlap, no_face, worst
+    return checked, overlap, no_face
 
 
 def face_case(style, moments, length, song_=None, hook="", effects=None):
-    tl_ = edits.build_timeline(moments, style, length, song_, effects or {}, talk, durations={"H": 30.0, "L": 30.0},
+    tl_ = edits.build_timeline(moments, style, length, song_, effects or {}, talk, durations={"H": 26.0, "L": 26.0},
                                hook=hook)
     out_ = TMP / f"face_{style}.mp4"
     editrender.render(tl_, face_src, song_, out_, TMP / f"face_{style}.jpg")
-    checked, overlap, no_face, n = words_vs_face(out_, tl_, captured.get(style, ""), style)
+    checked, overlap, no_face = words_vs_face(out_, tl_, captured.get(style, ""), style)
     expect(checked >= 20 and not overlap,
            f"{style}: words never over his face ({checked} frames with words checked, over the face at {overlap[:5]})")
     expect(no_face <= max(2, checked // 10), f"{style}: his face is found under the words ({no_face} frames without)")
@@ -346,7 +344,7 @@ fun_ms = [{"id": f"f{i}", "source": "HL"[i % 2], "start": 1.5 + i * 7, "end": 6.
 face_case("funny", fun_ms, 15, hook="He was not ready for this")
 vel_ms = [{"id": f"v{i}", "source": "HL"[i % 2], "start": 1.0 + i * 4, "end": 4.0 + i * 4, "hit": 2.5 + i * 4,
            "text": ["SEVEN YEARS", "STICK TO IT", "NO DAYS OFF", "STAY HUNGRY", "KEEP GOING", "PAY DAY"][i],
-           "drop": i == 3} for i in range(6)]
+           "drop": i == 3} for i in range(5)]
 face_case("velocity", vel_ms, 8, song, hook="Seven years to get here")
 editrender.build_ass = _real_build_ass
 for style, t in (("motivation", 6.0), ("motivation", 13.0), ("funny", 4.0), ("velocity", 5.0)):

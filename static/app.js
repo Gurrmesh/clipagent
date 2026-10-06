@@ -693,6 +693,16 @@ function doctorHTML(c) {
   return `<div class="doc ${d.status}"><b>${head}${score}</b>${d.status !== 'good' && first ? ` — ${esc(first)}` : ''}${
     rest ? ` <button type="button" class="more-link" data-act="doc">More</button><div class="full hidden">${esc(d.summary)}</div>` : ''}</div>`;
 }
+/* "Phone copy (32 MB)": offered next to Download when the full file is over 50 MB */
+function phoneLabel(p) { return p && p.ready && p.mb ? `Phone copy (${p.mb} MB)` : 'Phone copy'; }
+function phoneTip(p) {
+  return `Smaller file for posting from your phone; same video${p && p.full_mb ? ` (the full file is ${Math.round(p.full_mb)} MB)` : ''}`
+    + (p && p.ready ? '' : '. The first time it takes about a minute, then it downloads by itself.');
+}
+function phoneDownload(url, p) {
+  if (!(p && p.ready)) toast('Making the phone copy — about a minute. It downloads by itself when it’s ready.');
+  location.href = url;
+}
 function clipCard(c, job) {
   const gate = c.compliance && c.compliance.status;
   const isCamp = !!(c.overlay || c.compliance || c.clip_type === 'campaign');
@@ -713,13 +723,19 @@ function clipCard(c, job) {
   const score = c.score ? `<span class="score ${c.score >= 80 ? 'hi' : ''}" title="How likely it is to do well, out of 100">Score ${c.score}</span>` : '';
   const len = ready || c.duration ? `<span class="len">${fmt(clipLength(c))}</span>` : '';
   let actions;
+  const phone = ready && c.phone && c.phone.needed;
+  const phoneBtn = phone ? `<button class="btn ghost small" data-act="phone" ${gate === 'blocked'
+    ? 'disabled title="Blocked by the campaign check — open the post kit to see why"'
+    : `title="${esc(phoneTip(c.phone))}"`}>${esc(phoneLabel(c.phone))}</button>` : '';
   if (!ready) actions = c.status === 'failed' ? `<div class="hint wide">${esc(c.reason || 'This clip failed to render.')}</div>` : '';
   else if (isCamp) actions = `<button class="btn small wide" data-act="kit">Post kit</button>
       ${c.overlay ? '' : '<button class="btn ghost small" data-act="edit">Edit</button>'}
-      <button class="btn ghost small ${c.overlay ? 'wide' : ''}" data-act="dl" ${gate === 'blocked' ? 'disabled title="Blocked by the campaign check — open the post kit to see why"' : ''}>Download</button>`;
+      <button class="btn ghost small ${c.overlay && !phone ? 'wide' : ''}" data-act="dl" ${gate === 'blocked' ? 'disabled title="Blocked by the campaign check — open the post kit to see why"' : ''}>Download</button>
+      ${phoneBtn}`;
   else actions = `<button class="btn small" data-act="dl">Download</button>
+      ${phoneBtn}
       <button class="btn ghost small" data-act="edit">Edit</button>
-      <button class="btn ghost small wide" data-act="copy">Copy caption</button>`;
+      <button class="btn ghost small ${phone ? '' : 'wide'}" data-act="copy">Copy caption</button>`;
   return `<article class="clip ${c.alt_of ? 'alt' : ''} ${c.status === 'failed' ? 'failed' : ''} ${HL === c.id ? 'hl' : ''}" data-id="${c.id}">
     <div class="poster" data-act="play" title="${ready ? 'Play' : ''}">${poster}${overlayBadge}</div>
     <div class="body">
@@ -748,6 +764,7 @@ function wireCards(job) {
       else if (act === 'undo') undoClip(c.id);
       else if (act === 'kit') openKit(c);
       else if (act === 'dl') location.href = `/api/clips/${c.id}/download`;
+      else if (act === 'phone') phoneDownload(`/api/clips/${c.id}/download?phone=1`, c.phone);
       else if (act === 'copy') {
         const tags = (c.hashtags || []).map(t => '#' + String(t).replace(/^#/, '')).join(' ');
         copyText([c.caption || '', tags].filter(Boolean).join('\n\n') || c.hook || '', 'Caption and hashtags copied');
@@ -2352,11 +2369,17 @@ function renderEditPreview(e) {
   $('ee-download').disabled = !e.video_url || blocked;
   $('ee-download').title = blocked ? 'Blocked by the campaign check — see why above' : '';
   $('ee-anyway').classList.toggle('hidden', !blocked);
+  const phone = !!(e.video_url && e.phone && e.phone.needed);
+  $('ee-phone').classList.toggle('hidden', !phone);
+  $('ee-phone').disabled = blocked;
+  $('ee-phone').textContent = phoneLabel(e.phone);
+  $('ee-phone').title = blocked ? 'Blocked by the campaign check — see why above' : phoneTip(e.phone);
   $('ee-copy').disabled = !e.post_text;
   $('ee-undo').classList.toggle('hidden', !(e.can_undo && !editWorking(e)));
   $('ee-notes').innerHTML = (e.notes || []).map(n => `<li>${esc(n)}</li>`).join('');
 }
 $('ee-download').addEventListener('click', () => { location.href = `/api/edits/${EE.id}/download`; });
+$('ee-phone').addEventListener('click', () => phoneDownload(`/api/edits/${EE.id}/download?phone=1`, EE.edit && EE.edit.phone));
 $('ee-anyway').addEventListener('click', () => {
   if (confirm('This edit breaks the campaign’s brief, so it will likely be rejected. Download it anyway?'))
     location.href = `/api/edits/${EE.id}/download?anyway=1`;

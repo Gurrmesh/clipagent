@@ -553,7 +553,9 @@ class FaceTrack:
 
     def __call__(self, a: float, b: float, tight: bool = False) -> Optional[Dict[str, float]]:
         boxes = self.core if tight else self.head
-        part = boxes[max(0, int(math.floor(a * FPS))):max(0, min(len(boxes), int(math.ceil(b * FPS)) + 1))]
+        # the frames the words are on: shown from a to b, as the ASS file says it (to 1/100 s)
+        n0, n1 = (int(math.ceil(round(x, 2) * FPS - 1e-6)) for x in (a, b))
+        part = boxes[max(0, n0):max(0, min(len(boxes), max(n1, n0 + 1)))]
         part = part[~np.isnan(part[:, 0])]
         if not len(part):
             return None
@@ -682,9 +684,11 @@ def build_ass(tl: Dict[str, Any], out: Path, face: Any = None) -> bool:
             add(a, b, style, f"{{\\an8\\pos({TEXT_CX},{y:.0f})\\fs{size}{tags}}}{line}", layer)
 
     def shots(a: float, b: float) -> List[Tuple[float, float]]:
-        """a..b cut where the picture moves to another moment (a short leftover joins its neighbour)."""
-        pts = [a] + [s["at"] for k, s in enumerate(segs)
-                     if k and s["moment"] != segs[k - 1]["moment"] and a + 0.3 < s["at"] < b - 0.3] + [b]
+        """a..b cut where the picture moves to another moment (a short leftover joins its neighbour) —
+        on the first frame of the new shot, in the 1/100 s steps of the ASS file."""
+        cuts = [math.floor(round(s["at"] * FPS) / FPS * 100 + 1e-6) / 100 for k, s in enumerate(segs)
+                if k and s["moment"] != segs[k - 1]["moment"]]
+        pts = [a] + [c for c in cuts if a + 0.3 < c < b - 0.3] + [b]
         return list(zip(pts, pts[1:]))
 
     hook = tl.get("hook") or {}
@@ -938,18 +942,22 @@ def swap_in(tmp: Path, out: Path) -> None:
     """Put the new video in place of the old one. Windows refuses to replace a file another program has open
     (the browser playing the edit): wait a little, then copy over it instead."""
     import shutil
+    from . import postready
     for _ in range(12):
         try:
             tmp.replace(out)
-            return
+            break
         except PermissionError:
             time.sleep(0.4)
-    try:
-        shutil.copyfile(tmp, out)
-        tmp.unlink(missing_ok=True)
-    except OSError as exc:
-        raise RuntimeError("The new version is made but couldn't replace the old one — it's open somewhere. "
-                           "Close the video and press Re-make.") from exc
+    else:
+        try:
+            shutil.copyfile(tmp, out)
+            tmp.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RuntimeError("The new version is made but couldn't replace the old one — it's open somewhere. "
+                               "Close the video and press Re-make.") from exc
+    if out.suffix.lower() == ".mp4":
+        postready.refresh(out)              # the old phone copy goes; a new one when it's over 50 MB
 
 def _groups(segs: List[Dict[str, Any]]) -> List[List[int]]:
     """Segments read with one decoder: same moment, footage running on."""
