@@ -25,7 +25,8 @@ MIN_FACE_FRACTION = 0.035  # ignore faces smaller than this share of frame width
 FACECAM_MIN_FACE = 0.018   # a streamer's face in a small facecam can be this small and still be found
 # A facecam box shorter than this share of the frame height is "small": cropping around it would
 # leave a tiny face, so the clip gets the split layout (face big on top, the content below).
-SPLIT_MAX_BOX_H = 0.40
+# (A talking head filling a fifth of the frame height makes a box of ~0.40: not small.)
+SPLIT_MAX_BOX_H = 0.32
 
 
 @dataclass
@@ -211,8 +212,14 @@ def find_facecam(faces: List[Face], count: int, source_aspect: float,
 
 
 def is_small_facecam(box: Optional[Dict[str, float]]) -> bool:
-    """Small enough that a crop around it would leave a tiny face: the split layout fits."""
-    return bool(box) and float(box.get("h", 1.0)) <= SPLIT_MAX_BOX_H
+    """A small webcam picture near the frame's edge (where streams put the facecam), small enough
+    that a crop around it would leave a tiny face: the split layout fits. A small face in the
+    middle of the frame is a person in a wide shot, not a facecam."""
+    if not box or float(box.get("h", 1.0)) > SPLIT_MAX_BOX_H:
+        return False
+    cx = float(box["x"]) + float(box["w"]) / 2
+    cy = float(box["y"]) + float(box["h"]) / 2
+    return cx < 0.3 or cx > 0.7 or cy < 0.3 or cy > 0.7
 
 
 def _plan_from_faces(source: Path, faces: List[Face], count: int) -> FramingPlan:

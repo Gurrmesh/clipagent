@@ -796,6 +796,11 @@ def plan_camera(tl: Timeline, an: Analysis, size: Tuple[int, int], edits: Dict[s
 
     if zoom_cap is not None:
         zoom = np.minimum(zoom, max(1.0, float(zoom_cap)))
+        if zoom_cap < 1.05:
+            # no room to hide a shake's edges either: the hits stay, the shake goes
+            sx[:] = 0.0
+            sy[:] = 0.0
+            rot[:] = 0.0
 
     # 4. Keep the window inside the picture at every zoom level.
     half_w = cw / (2 * zoom)
@@ -828,9 +833,63 @@ def plan_camera(tl: Timeline, an: Analysis, size: Tuple[int, int], edits: Dict[s
         "jump_cuts": int(jump.sum()), "scene_cuts": int(scene[1:].sum()),
         "detector": an.detector, "blurred_frames": int((blur > 1).sum()),
         "style": "calm" if calm else "punchy",
+        "text": text_stats,
     }
     return Camera(cx=cx, cy=cy, zoom=zoom, rot=rot, sx=sx, sy=sy, gain=gain,
                   blur=blur, new_shot=new_shot, stats=stats)
+
+
+def _fit_text(tl: Timeline, an: Analysis, size: Tuple[int, int], cw: float, ch: float,
+              cx: np.ndarray, cy: np.ndarray, zoom: np.ndarray, bounds: List[int], src: np.ndarray,
+              text: List[Tuple[float, float, float, float, int, int]], allow_zoom: bool) -> Dict[str, Any]:
+    """Shot by shot, move the crop (in place) so it never cuts through the creator's burned-in words:
+    each block either whole inside the frame (first choice, when the face stays well framed) or
+    wholly outside it — shifted aside, or a slightly tighter crop. A shot where neither works is
+    counted in "failed": the caller then shows the whole picture instead."""
+    W, H = size
+    margin = textdetect.MARGIN * W
+    shots = failed = 0
+    modes: List[str] = []
+    for a, b in zip(bounds[:-1], bounds[1:]):
+        seg = src[a:b]
+        lo, hi = int(seg.min()), int(seg.max())
+        boxes = [r[:4] for r in text if r[4] <= hi and r[5] >= lo]
+        if not boxes:
+            continue
+        hw, hh = cw / (2 * zoom[a:b]), ch / (2 * zoom[a:b])
+        risky = np.zeros(b - a, bool)
+        for box in boxes:
+            risky |= textdetect.cuts(cx[a:b], cy[a:b], hw, hh, box, margin)
+        if not risky.any():
+            continue                                         # already whole, or already out of the frame
+        rows = []
+        for k in range(b - a):
+            for f in an.faces.get(int(seg[k]), ()):
+                rows.append((k, (f[0] - f[2] / 2) * W, (f[1] - f[3] / 2) * H,
+                             (f[0] + f[2] / 2) * W, (f[1] + f[3] / 2) * H))
+        got = textdetect.fit_window(cx[a:b], cy[a:b], zoom[a:b], cw, ch, W, H, boxes,
+                                    np.array(rows) if rows else None, max_zoom=TEXT_MAX_ZOOM,
+                                    margin=margin, allow_zoom=allow_zoom)
+        if got is None:
+            failed += b - a
+            continue
+        cx[a:b], cy[a:b], zoom[a:b] = got["cx"], got["cy"], got["zoom"]
+        shots += 1
+        modes += got["modes"]
+    return {"shots_moved": shots, "modes": modes, "failed_frames": failed}
+
+
+def _zoom_cap(boxes_out: List[Tuple[float, float, float, float]]) -> Optional[float]:
+    """The most the camera may punch in (about the frame's centre) and still show every one of
+    these output-px boxes whole, TEXT_EDGE px from the edge. None: no limit needed."""
+    cap = None
+    for (x0, y0, x1, y1) in boxes_out:
+        for u, c in ((x0, OW / 2), (x1, OW / 2), (y0, OH / 2), (y1, OH / 2)):
+            d = abs(u - c)
+            if d > 1e-6:
+                z = (c - TEXT_EDGE) / d
+                cap = z if cap is None else min(cap, z)
+    return None if cap is None else max(1.0, cap)
 
 
 def _impacts(energy: np.ndarray, new_shot: np.ndarray, fps: float, N: int) -> List[int]:
@@ -966,7 +1025,7 @@ def _layout_base(layout: str, size: Tuple[int, int], cam_box: Dict[str, float]):
     """For blur/split: fixed source->output affines for each panel."""
     W, H = size
     if layout == "split":
-        top_h, bot_h = 864, OH - 864
+        top_h, bot_h = SPLIT_TOP, OH - SPLIT_TOP
         bx, by = cam_box["x"] * W, cam_box["y"] * H
         bw, bh = max(8.0, cam_box["w"] * W), max(8.0, cam_box["h"] * H)
         sc = max(OW / bw, top_h / bh)
@@ -1035,19 +1094,120 @@ def _stack_base(an: "Analysis", size: Tuple[int, int]) -> Optional[Dict[str, Any
             "top_h": STACK_H, "bot_h": OH - STACK_H, "kind": kind}
 
 
-def _compose(warper: _Warper, layout: str, base, fr: _Frame) -> _Frame:
+def _window(M: np.ndarray, ph: float) -> Tuple[float, float, float, float]:
+    """The source window (x0, y0, w, h) an unrotated panel affine shows in an OW x ph panel."""
+    s = float(M[0, 0])
+    return (-float(M[0, 2]) / s, -float(M[1, 2]) / s, OW / s, ph / s)
+
+
+def _cover_affine(win: Tuple[float, float, float, float], ph: float) -> np.ndarray:
+    """Source window -> an OW x ph panel, filling it (the window has the panel's shape)."""
+    x0, y0, w, h = win
+    s = OW / w
+    return np.array([[s, 0, OW / 2 - s * (x0 + w / 2)], [0, s, ph / 2 - s * (y0 + h / 2)]])
+
+
+def _fit_panel(win: Tuple[float, float, float, float], size: Tuple[int, int], boxes: List[Tuple[float, ...]],
+               faces: List[Tuple[float, float, float, float]], allow_zoom: bool
+               ) -> Tuple[Optional[Tuple[float, float, float, float]], List[str]]:
+    """A fixed panel window moved (or tightened) so no burned-in text block is cut by it.
+    Returns (window, modes); (None, []) when that can't be done with the faces kept framed."""
+    W, H = size
+    x0, y0, w, h = win
+    cx, cy = np.array([x0 + w / 2]), np.array([y0 + h / 2])
+    hw, hh = np.array([w / 2]), np.array([h / 2])
+    m = textdetect.MARGIN * W
+    if not any(textdetect.cuts(cx, cy, hw, hh, b[:4], m).any() for b in boxes):
+        return win, []
+    # every block near the window has to come out whole too, not just the ones cut now
+    near = [b[:4] for b in boxes if b[2] > x0 - w and b[0] < x0 + 2 * w and b[3] > y0 - h and b[1] < y0 + 2 * h]
+    rows = np.array([(0, *f) for f in faces]) if faces else None
+    got = textdetect.fit_window(cx, cy, np.array([1.0]), w, h, W, H, near[:3], rows,
+                                max_zoom=TEXT_MAX_ZOOM, margin=m, allow_zoom=allow_zoom)
+    if got is None:
+        return None, []
+    z = float(got["zoom"][0])
+    nw, nh = w / z, h / z
+    return (float(got["cx"][0]) - nw / 2, float(got["cy"][0]) - nh / 2, nw, nh), got["modes"]
+
+
+def _boxes_out(M: np.ndarray, ph: float, y_off: float, boxes: List[Tuple[float, ...]]) -> List[Tuple[float, ...]]:
+    """Text blocks wholly shown in a panel, in output px."""
+    out = []
+    for b in boxes:
+        x0, y0 = M[0, 0] * b[0] + M[0, 2], M[1, 1] * b[1] + M[1, 2]
+        x1, y1 = M[0, 0] * b[2] + M[0, 2], M[1, 1] * b[3] + M[1, 2]
+        if x0 >= -1 and x1 <= OW + 1 and y0 >= -1 and y1 <= ph + 1:
+            out.append((x0, y0 + y_off, x1, y1 + y_off))
+    return out
+
+
+def _split_setup(size: Tuple[int, int], cam_box: Dict[str, float], boxes: List[Tuple[float, ...]],
+                 faces: List[Tuple[float, float, float, float]], allow_zoom: bool) -> Dict[str, Any]:
+    """The facecam split: the facecam scaled big in the top panel, the content (game, the video
+    being reacted to, the charts) in the bottom one, centred on the content rather than on the
+    facecam's corner. Neither panel's edge may cut through burned-in words: the content window
+    moves or tightens, and when it can't, the content panel shows the whole picture instead."""
+    W, H = size
+    top_h, bot_h = SPLIT_TOP, OH - SPLIT_TOP
+    bx, by = cam_box["x"] * W, cam_box["y"] * H
+    bw, bh = max(8.0, cam_box["w"] * W), max(8.0, cam_box["h"] * H)
+    sc = max(OW / bw, top_h / bh)
+    top_win = (bx + bw / 2 - OW / sc / 2, by + bh / 2 - top_h / sc / 2, OW / sc, top_h / sc)
+    in_cam = [f for f in faces if bx <= (f[0] + f[2]) / 2 <= bx + bw and by <= (f[1] + f[3]) / 2 <= by + bh]
+    others = [f for f in faces if f not in in_cam]
+    fitted, top_modes = _fit_panel(top_win, size, boxes, in_cam, allow_zoom)
+    top = _cover_affine(fitted or top_win, top_h)
+
+    # the content: the widest window of the bottom panel's shape, centred on what isn't the facecam
+    asp = OW / bot_h
+    ww, wh = (H * asp, float(H)) if W / H >= asp else (float(W), W / asp)
+    cxc = W / 2
+    if bx > W * 0.45 and bx > 0.5 * ww:                 # facecam on the right: centre on what's left of it
+        cxc = bx / 2
+    elif bx + bw < W * 0.55 and W - (bx + bw) > 0.5 * ww:
+        cxc = (bx + bw + W) / 2
+    cxc = min(max(cxc, ww / 2), W - ww / 2)
+    fitted, bot_modes = _fit_panel((cxc - ww / 2, (H - wh) / 2, ww, wh), size, boxes, others, allow_zoom)
+    out: Dict[str, Any] = {"top_h": top_h, "bot_h": bot_h, "top": top, "content": "crop",
+                           "modes": top_modes + bot_modes}
+    if fitted is None:
+        # the whole picture, full width, over a soft blurred copy of itself
+        sb, sf = max(OW / W, bot_h / H), OW / W
+        out["bottom"] = np.array([[sb, 0, OW / 2 - sb * W / 2], [0, sb, bot_h / 2 - sb * H / 2]])
+        out["bottom_fit"] = np.array([[sf, 0, 0.0], [0, sf, (bot_h - H * sf) / 2]])
+        out["content"] = "whole"
+        shown = out["bottom_fit"]
+    else:
+        out["bottom"] = _cover_affine(fitted, bot_h)
+        shown = out["bottom"]
+    out["boxes_out"] = _boxes_out(top, top_h, 0, boxes) + _boxes_out(shown, bot_h, top_h, boxes)
+    return out
+
+
+def _blurred_cover(warper: "_Warper", fr: _Frame, M: np.ndarray, w: int, h: int) -> _Frame:
+    """A soft, slightly darkened copy of the picture filling a w x h area (behind a whole-frame picture)."""
     cv2 = warper.cv2
+    small = warper.warp(fr, M / 8.0, (w // 8, h // 8), fast=True)
+    sizes = ((w, h), (w // 2, h // 2), (w // 2, h // 2))
+    bg = _Frame(*(np.ascontiguousarray(cv2.resize(cv2.GaussianBlur(p, (0, 0), 5), sz,
+                                                  interpolation=cv2.INTER_LINEAR))
+                  for p, sz in zip((small.y, small.u, small.v), sizes)))
+    bg.y = cv2.convertScaleAbs(bg.y, alpha=0.82)
+    return bg
+
+
+def _compose(warper: _Warper, layout: str, base, fr: _Frame) -> _Frame:
     if layout in ("split", "stack"):
         top = warper.warp(fr, base["top"], (OW, base["top_h"]))
-        bot = warper.warp(fr, base["bottom"], (OW, base["bot_h"]))
+        if base.get("bottom_fit") is not None:
+            bg = _blurred_cover(warper, fr, base["bottom"], OW, base["bot_h"])
+            bot = warper.warp(fr, base["bottom_fit"], (OW, base["bot_h"]), dst=bg, transparent=True)
+        else:
+            bot = warper.warp(fr, base["bottom"], (OW, base["bot_h"]))
         return _Frame(np.vstack([top.y, bot.y]), np.vstack([top.u, bot.u]), np.vstack([top.v, bot.v]))
     # blur
-    small = warper.warp(fr, base["bg"] / 8.0, (OW // 8, OH // 8), fast=True)
-    sizes = ((OW, OH), (OW // 2, OH // 2), (OW // 2, OH // 2))
-    bg = _Frame(*(np.ascontiguousarray(cv2.resize(cv2.GaussianBlur(p, (0, 0), 5), size,
-                                                  interpolation=cv2.INTER_LINEAR))
-                  for p, size in zip((small.y, small.u, small.v), sizes)))
-    bg.y = cv2.convertScaleAbs(bg.y, alpha=0.82)
+    bg = _blurred_cover(warper, fr, base["bg"], OW, OH)
     return warper.warp(fr, base["fg"], dst=bg, transparent=True)
 
 
@@ -1129,49 +1289,212 @@ def _escape(path: Path) -> str:
     return str(path).replace("\\", "/").replace(":", r"\:")
 
 
+def _to_output(layout: str, base: Optional[Dict[str, Any]], cam: "Camera", size: Tuple[int, int], n: int,
+               box: Tuple[float, float, float, float]) -> List[Tuple[float, float, float, float]]:
+    """Where a source box (px) lands on output frame n, as output px boxes — one per panel that
+    shows its centre (a facecam's face can show in both halves of the split). [] if off screen."""
+    W, H = size
+    x0, y0, x1, y1 = box
+    mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+    z = float(cam.zoom[n]) or 1.0
+    if layout == "fill":
+        cw, ch = (H * 9 / 16, float(H)) if W / H >= 9 / 16 else (float(W), W * 16 / 9)
+        hw, hh = cw / (2 * z), ch / (2 * z)
+        left = min(max(float(cam.cx[n]) - hw, 0.0), W - 2 * hw)
+        top = min(max(float(cam.cy[n]) - hh, 0.0), H - 2 * hh)
+        if not (left <= mx <= left + 2 * hw):
+            return []
+        s = OH / (2 * hh)
+        return [((x0 - left) * s, (y0 - top) * s, (x1 - left) * s, (y1 - top) * s)]
+    if not base:
+        return []
+    if layout == "blur":
+        panels = [(base["fg"], 0.0, float(OH))]
+    else:
+        lower = base["bottom_fit"] if base.get("bottom_fit") is not None else base["bottom"]
+        panels = [(base["top"], 0.0, float(base["top_h"])), (lower, float(base["top_h"]), float(base["bot_h"]))]
+    out = []
+    for M, off, ph in panels:
+        if not (0 <= M[0, 0] * mx + M[0, 2] <= OW and 0 <= M[1, 1] * my + M[1, 2] <= ph):
+            continue
+        b = [M[0, 0] * x0 + M[0, 2], M[1, 1] * y0 + M[1, 2] + off, M[0, 0] * x1 + M[0, 2], M[1, 1] * y1 + M[1, 2] + off]
+        # the camera's punch-in, about the frame's centre
+        out.append((OW / 2 + z * (b[0] - OW / 2), OH / 2 + z * (b[1] - OH / 2),
+                    OW / 2 + z * (b[2] - OW / 2), OH / 2 + z * (b[3] - OH / 2)))
+    return out
+
+
 def _hook_clear_top(cam: "Camera", an: Analysis, tl: Timeline, size: Tuple[int, int],
                     seconds: float, top: int, block: int,
-                    limit: Optional[int] = None) -> Optional[int]:
+                    limit: Optional[int] = None, layout: str = "fill",
+                    base: Optional[Dict[str, Any]] = None,
+                    text: Optional[List[Tuple[float, ...]]] = None) -> Optional[int]:
     """Where the hook should sit so it never covers a face's eyes while it is up.
 
     At the top of the frame by default; when a face on screen in those first
     seconds would be under it (a wide stage shot puts the speaker's eyes right
     there), it moves to just below the chin — the first frame is the one the
-    feed shows, and a hook over someone's eyes is the worst one. None: leave it."""
-    if not an.faces or block <= 0:
+    feed shows, and a hook over someone's eyes is the worst one. The creator's own
+    burned-in words (`text`, source px boxes) shown in the frame are kept clear the
+    same way, so two titles never sit on top of each other. None: leave it."""
+    if block <= 0 or not (an.faces or text):
         return None
     W, H = size
-    cw, ch = (H * 9 / 16, float(H)) if W / H >= 9 / 16 else (float(W), W * 16 / 9)
     keys = np.array(sorted(an.faces), dtype=np.int64)
     src = tl.src_index()
     n_max = min(len(src), max(1, int(seconds * float(tl.fps))))
-    eyes, chins = [], []
+    eyes, chins, words = [], [], []
     for n in range(0, n_max, 2):
-        i = int(np.searchsorted(keys, src[n], side="right")) - 1
+        i = int(np.searchsorted(keys, src[n], side="right")) - 1 if keys.size else -1
+        if i >= 0 and src[n] - keys[i] <= float(tl.fps) * 0.5:
+            for f in an.faces[int(keys[i])]:
+                face = ((f[0] - f[2] / 2) * W, (f[1] - f[3] / 2) * H, (f[0] + f[2] / 2) * W, (f[1] + f[3] / 2) * H)
+                for (_, y0, _, y1) in _to_output(layout, base, cam, size, n, face):
+                    if y1 - y0 < 0.05 * OH:                  # a face in the far background
+                        continue
+                    eyes.append(y0 + 0.30 * (y1 - y0))
+                    chins.append(y1)
+        for b in text or []:
+            if len(b) > 5 and not (b[4] <= src[n] <= b[5]):
+                continue
+            for (bx0, y0, bx1, y1) in _to_output(layout, base, cam, size, n, tuple(b[:4])):
+                if bx0 >= -2 and bx1 <= OW + 2 and y0 >= -2 and y1 <= OH + 2:
+                    words.append((y0, y1))
+    if not eyes and not words:
+        return None
+
+    def clear(t: float) -> bool:
+        return (all(t + block <= e or t >= c for e, c in zip(eyes, chins))
+                and all(t + block <= y0 - 10 or t >= y1 + 10 for y0, y1 in words))
+
+    if clear(top):                                       # it only covers hair and forehead: fine
+        return None
+    stop = captions.CAPTION_TOP if limit is None else limit
+    for t in sorted({int(c + 40) for c in chins} | {int(y1 + 24) for _, y1 in words}):
+        if t > top and t + block <= stop and clear(t):
+            return t
+    return None
+
+
+def _split_hook_top(cam: "Camera", an: Analysis, tl: Timeline, size: Tuple[int, int], base: Dict[str, Any],
+                    block: int, limit: int, floor: int) -> int:
+    """The split layout's hook: just above the seam between the face and the content, under the
+    chin — near the split line, off both the face and the content."""
+    W, H = size
+    keys = np.array(sorted(an.faces), dtype=np.int64)
+    src = tl.src_index()
+    chin = None
+    for n in range(0, min(len(src), max(1, int(2.4 * float(tl.fps)))), 2):
+        i = int(np.searchsorted(keys, src[n], side="right")) - 1 if keys.size else -1
         if i < 0 or src[n] - keys[i] > float(tl.fps) * 0.5:
             continue
-        z = float(cam.zoom[n]) or 1.0
-        hw, hh = cw / (2 * z), ch / (2 * z)
-        left = min(max(float(cam.cx[n]) - hw, 0.0), W - 2 * hw)
-        win_top = min(max(float(cam.cy[n]) - hh, 0.0), H - 2 * hh)
         for f in an.faces[int(keys[i])]:
-            fx, fy, fh = f[0] * W, f[1] * H, f[3] * H
-            if not (left <= fx <= left + 2 * hw):
-                continue
-            y0 = (fy - fh / 2 - win_top) / (2 * hh) * OH
-            y1 = (fy + fh / 2 - win_top) / (2 * hh) * OH
-            if y1 - y0 < 0.05 * OH:                      # a face in the far background
-                continue
-            eyes.append(y0 + 0.30 * (y1 - y0))
-            chins.append(y1)
-    if not eyes:
-        return None
-    if top + block <= min(eyes):                         # it only covers hair and forehead: fine
-        return None
-    below = int(max(chins) + 40)
-    if below + block <= (captions.CAPTION_TOP if limit is None else limit):
-        return below
-    return None
+            face = ((f[0] - f[2] / 2) * W, (f[1] - f[3] / 2) * H, (f[0] + f[2] / 2) * W, (f[1] + f[3] / 2) * H)
+            for (_, y0, _, y1) in _to_output("split", base, cam, size, n, face):
+                if y1 <= base["top_h"] + 4 and y1 - y0 >= 0.05 * OH:
+                    chin = y1 if chin is None else max(chin, y1)
+    top = limit - block
+    if chin is not None and top < chin + 12:
+        top = int(chin + 12)              # a long hook runs a little past the seam rather than over his mouth
+    return int(max(floor, top))
+
+
+# --- one sparse look at the clip: burned-in words, a small facecam ---------------------------------
+
+def _look(source: Path, tl: Timeline, size: Tuple[int, int]) -> Tuple[List[Tuple[float, np.ndarray]],
+                                                                      List[Tuple[float, float]]]:
+    """Small frames every ~2 s of what the clip shows, and its spans in source seconds. Frames
+    that don't match the source's shape (a rotated phone video read two ways) are dropped."""
+    spans = [(float(Fraction(s) / tl.fps), float(Fraction(e) / tl.fps)) for s, e in tl.segments]
+    try:
+        frames = textdetect.sample_frames(source, textdetect.span_times(spans))
+    except Exception:
+        return [], spans
+    W, H = size
+    want = H / max(1, W)
+    return [(t, f) for t, f in frames if abs(f.shape[0] / max(1, f.shape[1]) - want) <= 0.03 * want], spans
+
+
+def _sample_faces(frames: List[Tuple[float, np.ndarray]]) -> List[framing.Face]:
+    """Faces in the sampled frames, small ones too (a facecam), as fractions of the frame."""
+    if not frames:
+        return []
+    try:
+        detect, _ = framing._detector()
+    except Exception:
+        return []
+    out: List[framing.Face] = []
+    for t, fr in frames:
+        h, w = fr.shape[:2]
+        for (x, y, fw, fh) in detect(fr):
+            if fw / w >= framing.FACECAM_MIN_FACE:
+                out.append(framing.Face(t=t, x=x / w, y=y / h, w=fw / w, h=fh / h))
+    return out
+
+
+def _choose_layout(source: Path, tl: Timeline, size: Tuple[int, int], edits: Dict[str, Any], layout: str,
+                   plan: Optional[FramingPlan]):
+    """Which layout this clip really gets, from one sparse look at its own frames.
+
+    Returns (layout, facecam box for the split or None, burned-in text regions, faces seen as
+    source px boxes, notes). With the layout on Auto, a small facecam in THIS clip means the
+    split (a facecam that shows in only part of a stream still gets it where it shows), and a
+    clip where the camera is full screen gets the crop even if the rest of the video had a
+    facecam. A split nobody can find a face for shows the whole picture instead of guessing."""
+    W, H = size
+    notes: List[str] = []
+    frames, spans = _look(source, tl, size)
+    regions = textdetect.find_regions(source, spans, frames=frames) if frames else []
+    faces = _sample_faces(frames) if layout in ("fill", "split") else []
+    face_px = [(f.x * W, f.y * H, (f.x + f.w) * W, (f.y + f.h) * H) for f in faces]
+    count = max(1, len(frames))
+    found = framing.find_facecam(faces, count, W / H, min_hits=0.45) if faces else None
+    cam_box = found if framing.is_small_facecam(found) else None
+    if (edits.get("layout") or "auto") == "auto" and layout in ("fill", "split") and frames:
+        if cam_box is not None:
+            layout = "split"
+        elif layout == "split":
+            full = {round(f.t, 2) for f in faces if f.w >= framing.MIN_FACE_FRACTION}
+            if len(full) >= 0.4 * count:
+                layout = "fill"                 # here the camera is full screen, not a facecam
+    if layout == "split":
+        if edits.get("facecam_manual") and edits.get("facecam"):
+            cam_box = dict(edits["facecam"])
+        elif cam_box is None:
+            cam_box = found or (dict(plan.facecam) if plan and plan.facecam else None)
+            if cam_box is None and faces:
+                cam_box = framing._facecam_box(framing._cluster(faces)[0], W / H)
+        if cam_box is None:
+            layout = "blur"
+            notes.append("Couldn't find a face for the facecam split, so the whole picture is shown — "
+                         "set the facecam box under Framing to split it anyway.")
+    if cam_box is not None:
+        cam_box = {k: float(cam_box.get(k, d)) for k, d in (("x", 0.0), ("y", 0.0), ("w", 0.28), ("h", 0.30))}
+    return layout, cam_box, regions, face_px, notes
+
+
+def _what(r: "textdetect.Region") -> Tuple[str, str]:
+    """Plain words for a block of burned-in text: ("the title at the top", "isn't")."""
+    cy = (r.y0 + r.y1) / 2
+    name = "title" if cy < 0.35 else ("captions" if cy > 0.65 else "words")
+    return f"the {name} {r.where()}", ("aren't" if name in ("captions", "words") else "isn't")
+
+
+def _stack_text(base: Dict[str, Any], size: Tuple[int, int], boxes: List[Tuple[float, ...]],
+                allow_zoom: bool) -> Optional[Dict[str, Any]]:
+    """The stacked split's two panels, moved so neither cuts burned-in words. None: they can't be."""
+    out = dict(base)
+    for key, ph in (("top", base["top_h"]), ("bottom", base["bot_h"])):
+        win = _window(base[key], ph)
+        x0, y0, w, h = win
+        face = (x0 + w * 0.3, y0 + h * 0.25, x0 + w * 0.7, y0 + h * 0.75)   # whoever the panel was framed on
+        fitted, _ = _fit_panel(win, size, boxes, [face], allow_zoom)
+        if fitted is None:
+            return None
+        out[key] = _cover_affine(fitted, ph)
+    out["boxes_out"] = (_boxes_out(out["top"], base["top_h"], 0, boxes)
+                        + _boxes_out(out["bottom"], base["bot_h"], base["top_h"], boxes))
+    return out
 
 
 def render_clip(
@@ -1206,16 +1529,73 @@ def render_clip(
     N = tl.total
     fps_str = f"{fps.numerator}/{fps.denominator}"
 
-    want_faces = (layout == "stack") or layout == "fill" and bool(edits.get("auto_frame", True)) \
-        and edits.get("crop_auto", True) is not False
-    an = analyse(source, tl, (W, H), want_faces=want_faces, vfr=vfr)
+    auto_crop = bool(edits.get("auto_frame", True)) and edits.get("crop_auto", True) is not False
+    # Faces are found in every layout: they also keep the hook and cards off people's eyes.
+    an = analyse(source, tl, (W, H), want_faces=True, vfr=vfr)
     stack_base = _stack_base(an, (W, H)) if layout == "stack" else None
     stack_refused = layout == "stack" and stack_base is None
     if stack_refused:
         layout = "fill"                    # this clip doesn't suit a stack: follow the speaker instead
+    layout, cam_box, regions, seen_faces, notes = _choose_layout(source, tl, (W, H), edits, layout, plan)
+    text_px = [(r.x0 * W, r.y0 * H, r.x1 * W, r.y1 * H, int(math.floor(r.t0 * float(fps))),
+                int(math.ceil(r.t1 * float(fps)))) for r in regions]
     energy = _energy(source, tl) if (has_audio and edits.get("motion", True)) else None
-    cam = plan_camera(tl, an, (W, H), edits, layout, energy)
+    allow_zoom = bool(edits.get("motion", True))
+    cam = plan_camera(tl, an, (W, H), edits, layout, energy, text=text_px if auto_crop else None)
     cw = H * 9 / 16 if W / H >= 9 / 16 else float(W)
+    widest = max(regions, key=lambda r: r.w) if regions else None
+    base: Optional[Dict[str, Any]] = None
+    if layout == "fill":
+        tstats = cam.stats.get("text") or {}
+        if tstats.get("failed_frames"):
+            # No crop keeps those words whole and his face framed: show the whole picture —
+            # under his facecam when there is one, else full width over a blurred copy.
+            what, _ = _what(widest)
+            if cam_box is not None:
+                layout = "split"
+                notes.append(f"Used the facecam split because of {what} — a vertical crop would cut its words in half.")
+            else:
+                layout = "blur"
+                notes.append(f"Showed the whole picture because of {what} — a vertical crop would cut its words in half.")
+        elif tstats.get("shots_moved"):
+            what, verb = _what(widest)
+            if all(m == "in" for m in tstats.get("modes") or []):
+                notes.append(f"Moved the frame so {what} {verb} cut off.")
+            else:
+                notes.append(f"Kept {what} out of the frame, so no half-cut words show.")
+        elif regions and not auto_crop:
+            m = textdetect.MARGIN * W
+            ch_ = float(H) if W / H >= 9 / 16 else W * 16 / 9
+            hw, hh = cw / (2 * cam.zoom), ch_ / (2 * cam.zoom)
+            if any(textdetect.cuts(cam.cx, cam.cy, hw, hh, b[:4], m).any() for b in text_px):
+                what, _ = _what(widest)
+                notes.append(f"Your crop cuts through {what} — drag Crop position a little, "
+                             "or pick Blurred bars to show it whole.")
+    if layout != "fill":
+        if layout == "split":
+            base = _split_setup((W, H), cam_box, text_px, seen_faces, allow_zoom)
+            if base["content"] == "whole" and widest is not None:
+                what, _ = _what(widest)
+                notes.append(f"Showed the whole picture under the facecam because of {what}.")
+            elif base["modes"] and widest is not None:
+                what, verb = _what(widest)
+                notes.append(f"Moved the content half so {what} {verb} cut off." if "in" in base["modes"]
+                             else f"Kept {what} out of the content half, so no half-cut words show.")
+        elif layout == "stack":
+            base = stack_base
+            if text_px and auto_crop:
+                fitted = _stack_text(stack_base, (W, H), text_px, allow_zoom)
+                if fitted is None:
+                    layout, base = "blur", None
+                    what, _ = _what(widest)
+                    notes.append(f"Showed the whole picture because of {what} — the stacked split would cut its words.")
+                else:
+                    base = fitted
+        if layout == "blur":
+            base = _layout_base("blur", (W, H), {})
+            base["boxes_out"] = _boxes_out(base["fg"], OH, 0, text_px)
+        cap = _zoom_cap(base.get("boxes_out") or []) if base else None
+        cam = plan_camera(tl, an, (W, H), edits, layout, energy, zoom_cap=cap)
 
     # --- captions and hook -------------------------------------------------------
     out_duration = float(Fraction(N) / fps)
@@ -1230,24 +1610,33 @@ def render_clip(
         brand = brandlogo.prepare(Path(edits["brand_logo"]), (OW, OH), brandlogo.SOURCE_MAX_W, brandlogo.SOURCE_MAX_H)
         brand["at"] = brandlogo.source_box((OW, OH), brand["w"], brand["h"])
     vchain = "[0:v]"
+    caption_position = edits.get("caption_position", "bottom")
+    if layout == "split" and caption_position in ("bottom", "pop"):
+        # on the seam between his face and the content: low down they would cover the content
+        caption_position = "middle"
+    cap_style, cap_size = edits.get("caption_style", "impact"), float(edits.get("caption_size", 1.0))
+
+    def text_top(default: int, block: int) -> Optional[int]:
+        """Where a hook or card goes: clear of eyes and of the creator's own words on screen;
+        in the split, just above the seam under his chin."""
+        limit = captions.caption_top(caption_position, cap_style, cap_size) - 20
+        if layout == "split" and base:
+            return _split_hook_top(cam, an, tl, (W, H), base, block, min(limit, base["top_h"] - 8), default)
+        return _hook_clear_top(cam, an, tl, (W, H), 2.4, default, block, limit, layout=layout, base=base,
+                               text=text_px)
+
     if show_captions or hook_text.strip() or headline.strip() or marks:
         ass_path = WORK_DIR / f"{clip_id}.ass"
         offset = brandlogo.source_text_offset((OW, OH), brand["h"]) if brand else 0
         hook_top = None
         if edits.get("hook_y") is not None:
             hook_top = int(edits["hook_y"])          # placed by hand, or by the clip doctor
-        elif hook_text.strip() and layout == "fill":
-            hook_top = _hook_clear_top(
-                cam, an, tl, (W, H), 2.4, captions.HOOK_TOP + offset,
-                captions.hook_block(hook_text, edits.get("caption_style", "impact"),
-                                    float(edits.get("caption_size", 1.0))),
-                captions.caption_top(edits.get("caption_position", "bottom"),
-                                     edits.get("caption_style", "impact"),
-                                     float(edits.get("caption_size", 1.0))) - 20)
+        elif hook_text.strip():
+            hook_top = text_top(captions.HOOK_TOP + offset, captions.hook_block(hook_text, cap_style, cap_size))
         captions.build_ass(
             words=words if show_captions else [], duration=out_duration,
             style_name=edits.get("caption_style", "impact"),
-            position=edits.get("caption_position", "bottom"),
+            position=caption_position,
             size_scale=float(edits.get("caption_size", 1.0)), hook=hook_text,
             accent=edits.get("accent", ""), out_path=ass_path,
             labels=marks, headline=headline,
@@ -1276,12 +1665,9 @@ def render_clip(
             continue
         top_off = brandlogo.source_text_offset((OW, OH), brand["h"]) if brand else 0
         y = int(card["y"]) if card.get("y") is not None else captions.HOOK_TOP + top_off
-        if card.get("y") is None and layout == "fill":
+        if card.get("y") is None:
             # Same rule as the hook: never over a face's eyes in the opening.
-            moved = _hook_clear_top(cam, an, tl, (W, H), 2.4, y, made["h"],
-                                    captions.caption_top(edits.get("caption_position", "bottom"),
-                                                         edits.get("caption_style", "impact"),
-                                                         float(edits.get("caption_size", 1.0))) - 20)
+            moved = text_top(y, made["h"])
             y = moved if moved is not None else y
         a = max(0.0, float(card.get("start") or 0.0))
         b = min(out_duration, float(card.get("end") or out_duration))
@@ -1333,13 +1719,6 @@ def render_clip(
     enc_log = tempfile.TemporaryFile()
     enc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=enc_log)
     warper = _Warper()
-    base = _layout_base(layout, (W, H), (plan.facecam if plan and plan.facecam else None)
-                        or edits.get("facecam") or {"x": 0.0, "y": 0.0, "w": 0.28, "h": 0.30}) \
-        if layout in ("split", "blur") else None
-    if layout == "split" and edits.get("facecam_manual") and edits.get("facecam"):
-        base = _layout_base(layout, (W, H), edits["facecam"])
-    if layout == "stack":
-        base = stack_base
 
     clean_at = min(N - 1, int(min(1.0, out_duration / 3) * float(fps)))
     clean_path = THUMB_DIR / f"{clip_id}_clean.jpg"
@@ -1441,8 +1820,11 @@ def render_clip(
         kind = "static"
         note = ("Stacked split — one person per panel." if base and base.get("kind") == "two"
                 else "Stacked split — the speaker on top, the whole scene below.")
+    elif layout == "split":
+        # "facecam" keeps the split on every re-render, doctor fix and undo while the layout is Auto
+        kind, note = "facecam", "Facecam split — the face big on top, the content below it."
     elif layout != "fill":
-        kind, note = "static", "Seamless cuts with impact punches."
+        kind, note = "static", "The whole picture over a blurred copy of itself, with seamless cuts."
     elif manual:
         kind, note = "static", "Fixed crop where you set it, with seamless motion."
     elif st["tracked"]:
@@ -1462,11 +1844,17 @@ def render_clip(
         kind, note = "static", "No faces to follow — centred, with seamless motion."
     if stack_refused:
         note = "Stacked split didn't suit this clip (close-ups or changing angles) — " + note[0].lower() + note[1:]
+    if notes:
+        note = " ".join([note] + notes)
     step = max(1, int(float(fps) / 2))
     src_idx = tl.src_index()
     track = [(float(Fraction(int(src_idx[n])) / fps), float(cam.cx[n] / W)) for n in range(0, N, step)]
-    result_plan = FramingPlan(kind=kind, facecam=plan.facecam if plan else None, track=track,
-                              confidence=1.0 if st["tracked"] else 0.0, note=note)
+    result_plan = FramingPlan(kind=kind, facecam=cam_box or (plan.facecam if plan else None), track=track,
+                              confidence=1.0 if st["tracked"] else 0.0, note=note, layout=layout,
+                              text=[r.to_json() for r in regions])
+    st["layout"] = layout
+    if base and layout == "split":
+        st["split_content"] = base.get("content")
     result: Dict[str, Any] = {"file": out_file, "thumb": thumb, "clean": clean_path,
                               "plan": result_plan, "stats": st, "frames": N}
     if debug:
