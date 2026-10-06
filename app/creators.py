@@ -376,6 +376,21 @@ def catalog_totals(creator_id: str, status: Union[None, str, Sequence[str]] = No
         return [dict(r) for r in conn.execute(q, args).fetchall()]
 
 
+def clear_unread(creator_id: str) -> int:
+    """Forget a listing nothing was read from yet (links or filters changed before the first
+    scan), so the next count or scan lists the creator's links again. Rows only, never files;
+    does nothing once any video's words were read or any moment exists."""
+    with store.connect() as conn:
+        read = conn.execute("SELECT COUNT(*) AS n FROM catalog WHERE creator_id=? AND status NOT IN"
+                            " ('listed','skipped')", (creator_id,)).fetchone()["n"]
+        found = conn.execute("SELECT COUNT(*) AS n FROM moments WHERE creator_id=?", (creator_id,)).fetchone()["n"]
+        if read or found:
+            return 0
+        cur = conn.execute("DELETE FROM catalog WHERE creator_id=? AND status IN ('listed','skipped')",
+                           (creator_id,))
+        return cur.rowcount or 0
+
+
 def reset_failed(creator_id: str) -> int:
     """A fresh scan tries again what failed for a passing reason (network, a busy site)."""
     with store.connect() as conn:
