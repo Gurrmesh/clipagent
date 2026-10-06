@@ -401,6 +401,7 @@ BREATH = 0.25                    # a gap this long inside a sentence is a clean 
 LEAD, TAIL = 0.1, 0.22           # air kept before the first word and after the last
 PAD_BEFORE, PAD_AFTER = 1.0, 1.5  # picture without words a moment may take before / after its words
 REACH_BEFORE, REACH_AFTER = 3.0, 2.0  # how far outside Claude's pick a cut may reach (setup / reaction)
+AFTER_PUNCH = 2.5                # at most this much talking after the punchline (silence may follow)
 UNIT = 0.1                       # the length budget works in tenths of a second
 BUDGET = 0.15                    # a finished edit stays within ±15 % of the length asked
 MIN_MOMENT = 0.8                 # nothing plays shorter than this, even when asked for by hand
@@ -530,8 +531,8 @@ def _punchline(m: Dict[str, Any], src: Dict[str, Any], style: str, a: float, b: 
     if str(m.get("key") or "").strip():
         found = find_words(src, str(m["key"]), a, b, reach=0.5)
         p = found[1] if found else None
-    if p is None and m.get("hit_auto") and line:
-        p = line[1]
+    if p is None and m.get("hit_auto"):
+        p = line[1] if line else inside[-1]                # no punchline given: his line's end, or where Claude's pick ends
     if p is None:
         p = min(inside, key=lambda k: 0.0 if ws[k]["start"] <= hit <= ws[k]["end"]
                 else min(abs(ws[k]["start"] - hit), abs(ws[k]["end"] - hit)))
@@ -543,13 +544,17 @@ Cut = Tuple[float, float, float, float, float, bool]     # cost, start earliest,
 
 def _cuts(src: Dict[str, Any], *, a: float, b: float, p: int, line: Optional[Tuple[int, int]], lo: float,
           hi: float, costs: Tuple[float, float, float], bounds: Tuple[float, float], src_dur: float,
-          contain: Optional[Tuple[float, float]] = None, extra: float = 0.0) -> List[Cut]:
+          contain: Optional[Tuple[float, float]] = None, extra: float = 0.0,
+          hit: Optional[float] = None) -> List[Cut]:
     """Every clean way to cut a moment around its punchline (word p): start on a word i ≤ p, end after
     a word j ≥ p, inside `bounds`, lo–hi seconds long (silence may pad it). `contain`: the cut must
-    hold that stretch (for "make it longer")."""
+    hold that stretch (for "make it longer"). A `hit` in the silence just before or after the words
+    is kept inside the cut (the reaction, the look)."""
     ws, sq, eq = src["ws"], src["sq"], src["eq"]
     lo_t, hi_t = bounds
     line_fits = bool(line) and ws[line[1]]["end"] - ws[line[0]]["start"] + LEAD + TAIL <= hi
+    close = next((j for j in range(p, len(ws)) if eq[j] == 0), len(ws) - 1)   # the punchline's sentence ends here
+    stop_at = ws[close]["end"] + AFTER_PUNCH                                     # talking past that: only a little
     out: List[Cut] = []
     for i in range(bisect.bisect_left(src["starts"], lo_t - 1e-6), p + 1):
         s_lo, s_hi = _start_range(ws, i)
@@ -558,10 +563,14 @@ def _cuts(src: Dict[str, Any], *, a: float, b: float, p: int, line: Optional[Tup
             continue
         if contain and s_hi > contain[0] + 0.05:
             break
+        if hit is not None and s_lo <= hit < s_hi:
+            s_hi = max(s_lo, hit - 0.05)
         for j in range(p, len(ws)):
             e_lo, e_hi = _end_range(ws, j, src_dur)
             e_hi = min(e_hi, hi_t)
-            if e_lo > hi_t + 1e-6 or e_lo - s_hi > hi + 0.05:
+            if hit is not None and e_lo < hit <= e_hi:
+                e_lo = min(e_hi, hit + 0.05)
+            if e_lo > hi_t + 1e-6 or e_lo - s_hi > hi + 0.05 or ws[j]["end"] > stop_at:
                 break
             if contain and e_lo < contain[1] - 0.05:
                 continue
@@ -593,15 +602,16 @@ def _options(cuts: List[Cut], lo: float, hi: float, natural: float) -> List[Tupl
     """For each length (in tenths of a second) inside lo–hi: the best cut and what it costs —
     edges, silence used as padding, distance from the moment's natural length."""
     best: Dict[int, Tuple[float, int]] = {}
-    u_lo, u_hi = int(math.ceil(lo / UNIT - 1e-6)), int(math.floor(hi / UNIT + 1e-6))
+    u_lo, u_hi = int(math.ceil(lo / UNIT - 1e-6)), int(math.floor((hi + 0.05) / UNIT + 1e-6))
     for idx, (c, s_lo, s_hi, e_lo, e_hi, centred) in enumerate(cuts):
         core, top = max(0.0, e_lo - s_hi), e_hi - s_lo
         for u in range(max(u_lo, int(math.ceil((core - 0.05) / UNIT))),
                        min(u_hi, int(math.floor((top + 0.05) / UNIT))) + 1):
             d = min(max(u * UNIT, core), top)
             cost = c + (0.0 if centred else 0.35 * (d - core)) + 0.25 * abs(d - natural)
-            if u not in best or cost < best[u][0]:
-                best[u] = (cost, idx)
+            key = int(math.ceil(d / UNIT - 1e-6))            # counted at its real length, rounded up
+            if key not in best or cost < best[key][0]:
+                best[key] = (cost, idx)
     return sorted((u, round(cost, 4), idx) for u, (cost, idx) in best.items())
 
 
@@ -650,7 +660,8 @@ def prepare_moment(m: Dict[str, Any], style: str, src: Dict[str, Any], src_dur: 
         if p is None:
             cuts = _silent_cut(src, a, b, hit, bounds, src_dur)
         else:
-            cuts = _cuts(src, a=a, b=b, p=p, line=line, lo=lo, hi=hi, costs=costs, bounds=bounds, src_dur=src_dur)
+            cuts = _cuts(src, a=a, b=b, p=p, line=line, lo=lo, hi=hi, costs=costs, bounds=bounds, src_dur=src_dur,
+                         hit=None if m.get("hit_auto") else hit)
     prep.update(cuts=cuts, natural=natural, opts=_options(cuts, prep["lo"], prep["hi"], natural))
     if not prep["opts"]:
         prep["why"] = (f"it's only {b - a:.1f} s, and there's no clean way to stretch it to {lo:g} s"
@@ -726,10 +737,10 @@ def fit_budget(preps: List[Dict[str, Any]], moments: List[Dict[str, Any]], targe
     inside = ok & (units >= t_lo) & (units <= t_hi)
     if inside.any():
         score = np.where(inside, best + lam * np.abs(units - target / UNIT) * UNIT, np.inf)
-        t = int(np.argmin(score))
-    else:
-        found = np.where(ok)[0]
-        t = int(found.max()) if found.max() < t_lo else int(found.min())   # too little material / too much forced
+    else:                                       # too little material (or too much sized by hand): as near as it's
+        miss = np.maximum(t_lo - units, 0) + np.maximum(units - t_hi, 0)          # worth getting, not at any price
+        score = np.where(ok, best + 1.0 * miss * UNIT, np.inf)
+    t = int(np.argmin(score))
     total = t * UNIT
     picks: List[Optional[Tuple[int, int]]] = [None] * n
     for k in range(n - 1, -1, -1):
@@ -1748,8 +1759,10 @@ def _fit_speech(usable: List[Dict[str, Any]], preps: List[Dict[str, Any]], style
     over = (len(usable) + 1) * period * 0.5 + 0.6 if analysis else 0.35
     lower, upper, L = budget["lower"], budget["upper"], budget["length"]
     best = None
+    slack = 0.02 * len(usable)                                 # cut edges are rounded to the hundredth, outwards
     for _ in range(5):
-        picks, _spoken = fit_budget(preps, usable, budget["target"] - over, max(0.0, lower - over), upper - over)
+        picks, _spoken = fit_budget(preps, usable, budget["target"] - over, max(0.0, lower - over),
+                                    upper - over - slack)
         chosen = [cut_moment(m, p, pk[0], pk[1]) for m, p, pk in zip(usable, preps, picks) if pk]
         tn: List[str] = []
         built = _speech_timeline(chosen, style, analysis, fx, durations, tn, flashes, song_start)
@@ -1845,7 +1858,8 @@ def build_timeline(moments: List[Dict[str, Any]], style: str, length: float,
     shown: Dict[str, float] = {}
     for seg in segments:
         shown[seg["moment"]] = shown.get(seg["moment"], 0.0) + seg["dur"]
-    played = [{"id": m["id"], "start": m["start"], "end": m["end"], "hit": m["hit"], "pick": m.get("pick"),
+    played = [{"id": m["id"], "source": m["source"], "start": m["start"], "end": m["end"], "hit": m["hit"],
+               "pick": m.get("pick"),
                "shown": round(shown[m["id"]], 2), "manual": bool(m.get("manual"))}
               for m in fitted if m["id"] in shown]
     lo, hi = st["window"]
