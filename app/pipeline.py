@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import (brandlogo, notify, campaign, compliance, downloads, framing, highlights, judge, media, overlay, render,
                store, structure, styles, tighten, transcribe)
-from . import doctor
+from . import doctor, lookcheck
 
 
 def _frame_rate(source: Path):
@@ -207,6 +207,29 @@ def build_parts(
     return segments, words_out, round(saved, 2), labels
 
 
+def _cut_out(segments: List[Tuple[float, float]], words: List[Dict[str, Any]], labels: List[Tuple[float, str]],
+             edits: Dict[str, Any], fps=None) -> Tuple[List[Tuple[float, float]], List[Dict[str, Any]],
+                                                       List[Tuple[float, str]], float]:
+    """Take the stretches the campaign look cut out (edits["cut_out"], absolute source seconds,
+    e.g. an offensive word) out of a clip's segments, and move its words and labels up to match.
+    Returns (segments, words, labels, seconds cut); what was really cut goes in edits["cut_applied"]."""
+    spans = [(float(a), float(b)) for a, b in edits.get("cut_out") or [] if float(b) > float(a)]
+    snapped = tighten._snap(sorted(spans), fps) if fps else sorted(spans)
+    pieces = lookcheck.cut_segments(segments, [list(s) for s in snapped])
+
+    def length(a: float, b: float) -> float:
+        return _frames(a, b, fps)
+
+    cut = sum(length(a, b) for a, b in segments) - sum(length(p, q) for p, q, _ in pieces)
+    if cut <= 0.01 or not pieces:
+        edits["cut_applied"] = []
+        return segments, words, labels, 0.0
+    moved = lookcheck.retime_words(words, segments, pieces, length)
+    marks = lookcheck.retime_words([{"w": text, "start": t, "end": t} for t, text in labels], segments, pieces, length)
+    edits["cut_applied"] = [[a, b] for a, b in spans if any(min(b, q) > max(a, p) for p, q in segments)]
+    return [(p, q) for p, q, _ in pieces], moved, [(m["start"], m["w"]) for m in marks], round(cut, 3)
+
+
 def _log_structure(job_id: str, clips: List[Dict[str, Any]]) -> None:
     """What the structure pass proposed and what the judge made of it, for later."""
     try:
@@ -328,12 +351,21 @@ def _variants_inside_pieces(clips: List[Dict[str, Any]], pieces: List[Tuple[floa
                 clip["stitch_problem"] = "its parts come from different parts of the stream"
 
 
+LOOK_IDS = ("identity", "logos", "offensive", "ai_footage")      # the campaign look's checks
+
+
 def _gate_source(rb: Dict[str, Any], clip_id: str) -> None:
     """Check a rendered clip-from-source campaign clip and store the verdict."""
     row = store.get_clip(clip_id)
     if not row or not row.get("file"):
         return
     edits = json.loads(row.get("edits") or "{}")
+    if lookcheck.stale(row, edits):
+        # never looked at, or a trim ran it on well past what was looked at: look again (no auto-fixes —
+        # a clip you are editing by hand stays as you made it)
+        lookcheck.review_clip(clip_id, rb, fixes=False)
+        row = store.get_clip(clip_id) or row
+        edits = json.loads(row.get("edits") or "{}")
     post = json.loads(row.get("post") or "{}")
     clip = {"start": row["start"], "end": row["end"], "saved": row.get("saved") or 0,
             "parts": json.loads(row.get("parts") or "[]")}
@@ -524,10 +556,11 @@ def _run_overlay_job(job_id: str) -> None:
             made = overlay.render(p["file"], clip_id, p["hook"], look, p["info"], logo=logo)
             store.update_clip(clip_id, file=str(made["file"]), thumb=str(made["thumb"]), status="checking",
                               framing=json.dumps({"kind": "overlay", "note": _overlay_note(made)}))
+            seen = lookcheck.review_overlay(rb, made["file"], p["hook"], p["title"], bool(made.get("logo")))
             result = compliance.check_overlay(rb, p["file"], made["file"], made, p["post"], p["hook"],
-                                              edits.get("tone"), p["info"])
+                                              edits.get("tone"), p["info"], look=seen)
             store.update_clip(clip_id, status="ready", compliance=json.dumps(result),
-                              edits=json.dumps({**edits, **_made_fields(made)}))
+                              edits=json.dumps({**edits, **_made_fields(made), "campaign_look": seen}))
 
         _stage(job_id, f"Rendering and checking {len(rows)} clips", 45)
         done = 0
@@ -617,6 +650,7 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
             min_len=settings.get("min_len"), max_len=settings.get("max_len"),
             guidance=campaign.picker_guidance(rules) if rules else "",
             platforms=settings.get("platforms") or None,
+            creator=lookcheck.rules_of(rules)["creator"] if rules else "",
         )
         if not clips:
             store.update_job(job_id, status="done", stage="No clip-worthy moments found",
@@ -722,6 +756,13 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
                     clip["hook"] = shown
                 clip["style_plan"] = plan
 
+        # Words go to whoever said them: a hook, card or caption that credits the
+        # campaign's creator with someone else's words is rewritten before anything is drawn.
+        creator = lookcheck.rules_of(rules)["creator"] if rules else ""
+        if creator:
+            for i, clip in enumerate(clips):
+                highlights.credit_clip(clip, style_edits.get(i), creator)
+
         # A campaign's caption is built from the brief's own lines, and what
         # Claude wrote (hooks, caption words) is checked against its tone rules.
         posts: Dict[int, Dict[str, Any]] = {}
@@ -746,6 +787,7 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
             if rules:
                 edits = campaign.clamp_edits(edits, rules)
                 edits["tone"] = tone.get(i)
+                edits["picker_speaker"] = {"who": clip.get("speaker") or "unclear", "name": clip.get("speaker_name") or ""}
                 extra_fields = {"post": posts[i], "caption": posts[i]["caption"],
                                 "hashtags": posts[i]["hashtags"]}
             stitched = len(clip.get("parts") or []) > 1
@@ -763,9 +805,12 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
                 other = "continuous" if clip["variant"] == "stitched" else "stitched"
                 alt = structure.choose({**clip}, other)
                 alt["alt_of"] = main_id
+                if creator:
+                    highlights.credit_clip(alt, None, creator)
                 alt_edits = render.merge_edits(_clip_edits(base_edits, alt, headline), style_edits.get(i) or {})
                 if rules:
-                    alt_edits = {**campaign.clamp_edits(alt_edits, rules), "tone": tone.get(i)}
+                    alt_edits = {**campaign.clamp_edits(alt_edits, rules), "tone": tone.get(i),
+                                 "picker_speaker": edits.get("picker_speaker")}
                 alt_stitched = len(alt["parts"]) > 1
                 alt_id = store.create_clip(job_id, {
                     **alt,
@@ -809,13 +854,19 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
                 words=json.dumps(words), saved=saved,
                 framing=json.dumps(used.to_json() if used else {}),
             )
+            blocked = False
             if rules:
-                _gate_source(rules, clip_id)
+                # The campaign look (who is in it, logos, offensive words, AI footage), with
+                # its safe fixes in one re-render — which gates the clip itself.
+                if lookcheck.review_clip(clip_id, rules) != "rerendered":
+                    _gate_source(rules, clip_id)
+                verdict = json.loads((store.get_clip(clip_id) or {}).get("compliance") or "{}")
+                blocked = any(c.get("status") == "fail" and c.get("id") in LOOK_IDS for c in verdict.get("checks") or [])
             if settings.get("doctor", True):
                 # The clip doctor: checks the finished file, fixes what it can in
                 # one re-render. Claude looks at the main versions; the runner-up
-                # versions get the measured checks only.
-                doctor.treat(clip_id, rules, use_claude=not clip.get("alt_of"))
+                # versions — and clips the campaign look blocked — get the measured checks only.
+                doctor.treat(clip_id, rules, use_claude=not clip.get("alt_of") and not blocked)
 
         _stage(job_id, f"Framing, rendering and checking {len(clip_ids)} clips", 80)
         done = 0
@@ -867,12 +918,15 @@ def rerender_overlay(clip_id: str, edits: Dict[str, Any]) -> Dict[str, Any]:
     info = overlay.inspect(source)
     made = overlay.render(source, clip_id, hook, look, info,
                           logo=_campaign_logo(json.loads(job.get("settings") or "{}") if job else {}, rb))
-    result = compliance.check_overlay(rb, source, made["file"], made, post, hook, tone, info)
+    # the footage is the same file as before: what the look saw in it still holds
+    seen = current.get("campaign_look") or lookcheck.review_overlay(rb, made["file"], hook, clip.get("title") or "",
+                                                                    bool(made.get("logo")))
+    result = compliance.check_overlay(rb, source, made["file"], made, post, hook, tone, info, look=seen)
     store.update_clip(
         clip_id, status="ready", hook=hook, file=str(made["file"]), thumb=str(made["thumb"]),
         compliance=json.dumps(result),
         framing=json.dumps({"kind": "overlay", "note": _overlay_note(made)}),
-        edits=json.dumps({**current, **look, "hook": hook, "tone": tone, **_made_fields(made)}),
+        edits=json.dumps({**current, **look, "hook": hook, "tone": tone, **_made_fields(made), "campaign_look": seen}),
     )
     store.update_job(clip["job_id"], stage=_campaign_stage(clip["job_id"]))
     return store.get_clip(clip_id)
@@ -946,8 +1000,13 @@ def rerender_clip(clip_id: str, edits: Dict[str, Any]) -> Dict[str, Any]:
     # A stitched clip keeps its parts. Dragging the trim handles means one
     # continuous stretch, so that turns it back into a continuous clip.
     parts = json.loads(clip.get("parts") or "[]")
+    if not merged.get("cut_out") and merged.get("cut_applied"):
+        merged["cut_applied"] = []
     if len(parts) > 1 and not span_changed:
         segments, auto_words, saved, labels = build_parts(parts, all_words, merged, fps)
+        if merged.get("cut_out"):
+            segments, auto_words, labels, cut = _cut_out(segments, auto_words, labels, merged, fps)
+            saved = round(saved + cut, 2)
         if not words:
             words = auto_words
         words = transcribe.respell(words, merged.get("spell"))
@@ -983,8 +1042,18 @@ def rerender_clip(clip_id: str, edits: Dict[str, Any]) -> Dict[str, Any]:
             keep, saved = [], 0.0                 # under the brief's minimum: keep the pauses
         elif keep and not words:
             words = retimed
+    own_words = words is None or not edits.get("words")
     if words is None:
         words = transcribe.words_between(all_words, start, end)
+    if merged.get("cut_out"):
+        # stretches the campaign look took out (an offensive word): cut from the source, words moved up
+        segs = [(start + a, start + b) for a, b in keep] if keep else [(start, end)]
+        segs, moved, _, cut = _cut_out(segs, words if own_words else [], [], merged, fps)
+        if cut > 0:
+            keep = [(round(a - start, 3), round(b - start, 3)) for a, b in segs]
+            saved = round(saved + cut, 2)
+            if own_words:
+                words = moved
     words = transcribe.respell(words, merged.get("spell"))
 
     # Re-look at the framing only when the span moved; otherwise the stored

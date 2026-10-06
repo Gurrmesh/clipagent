@@ -20,7 +20,7 @@ from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, U
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import (brandlogo, campaign, captions, doctor, downloads, edits, instruct, media, money, notify, overlay,
+from . import (brandlogo, campaign, captions, doctor, downloads, edits, identity, instruct, media, money, notify, overlay,
                pipeline, render, store, styles, transcribe)
 from .config import (ANTHROPIC_API_KEY, BASE_DIR, CLIP_DIR, MAX_CLIPS, THUMB_DIR,
                      WHISPER_API_KEY, WORK_DIR)
@@ -809,6 +809,45 @@ def campaign_logo_file(name: str) -> FileResponse:
     if not path.exists():
         raise HTTPException(404, "No logo")
     return FileResponse(path, media_type="image/png")
+
+
+# "Who is <creator>?": reference photos for the campaign look's face check (identity.py)
+
+@app.get("/api/campaigns/{campaign_id}/identity")
+def campaign_identity(campaign_id: str) -> Dict[str, Any]:
+    if not store.get_campaign(campaign_id):
+        raise HTTPException(404, "Campaign not found")
+    return identity.status(campaign_id)
+
+
+@app.post("/api/campaigns/{campaign_id}/identity/photo")
+async def campaign_identity_photo(campaign_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
+    if not store.get_campaign(campaign_id):
+        raise HTTPException(404, "Campaign not found")
+    if Path(file.filename or "").suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+        raise HTTPException(400, "Use a photo: JPG, PNG or WEBP")
+    tmp = _save_upload(file)
+    try:
+        return identity.add_photo(campaign_id, tmp)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+@app.delete("/api/campaigns/{campaign_id}/identity/photo/{name}")
+def campaign_identity_photo_remove(campaign_id: str, name: str) -> Dict[str, Any]:
+    if not store.get_campaign(campaign_id):
+        raise HTTPException(404, "Campaign not found")
+    return identity.remove_photo(campaign_id, name)
+
+
+@app.get("/media/identity/{campaign_id}/{name}")
+def campaign_identity_file(campaign_id: str, name: str) -> FileResponse:
+    path = identity.photo_path(campaign_id, name)
+    if not path.exists() or path.suffix.lower() != ".jpg":
+        raise HTTPException(404, "No photo")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @app.post("/api/campaigns/{campaign_id}/jobs")
