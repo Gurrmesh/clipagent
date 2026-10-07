@@ -80,6 +80,7 @@ and ends with `all checks behaved`. They use a temp `DATA_DIR`, stand-ins for Cl
 | `brief_reader.py` | the brief reader's rules (look for, date rule, must mention, primary focus, no logos/AI), the reposts misread fix, "Read the brief again" |
 | `downloads.py` | YouTube bot-check pause (queue waits, Try again, restart), long streams downloaded in parts, source facts (~1 min) |
 | `campaign_checks.py` | who is on screen and talking, logos/banners, offensive words cut out or blocked, AI footage (~60 s) |
+| `post_ready.py` | phone copies of clips/edits over 50 MB: size, same length, stale copies removed, download link |
 | `framing_text.py` | burned-in text never half-cut, whole-picture fallback, small-facecam split (~3 min, renders real clips) |
 
 Always run the fast suites (`ui_api`, `ask_changes`, `money_side`, `telegram_updates`, `style_brain`,
@@ -136,6 +137,8 @@ FastAPI backend (`app/`), one-page front end (`templates/index.html`, `static/ap
   `tools/make_test_footage.py` draws a talking-head test video; `tools/make_test_song.py` makes test songs.
 - `store.py` — all tables: jobs, clips, transcripts, presets, campaigns, requests, sounds, edits (+ migrations dict
   for added columns).
+- `postready.py` — a smaller `<name>_post.mp4` phone copy for clips/edits over 50 MB (background; stale after any
+  re-render); every final encode is capped by `motion.VIDEO_CAP` (11 Mbps).
 - `toolio.py` — read Claude's tool calls defensively (Claude sometimes returns JSON-in-a-string).
 
 ### API (main.py)

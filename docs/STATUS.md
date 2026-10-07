@@ -82,6 +82,13 @@ Stitch are being built.
   keeps them whole, keeps them fully out, or shows the whole picture; the clip's note says what was done. The hook and
   cards avoid faces and his titles in every layout. Moments where a title forces the whole picture rank a little
   lower. Edit Maker moments follow the same rule.
+- **Smaller files**: every final video encode is capped at ~11 Mbps (a 27 s Motivation edit with grain: 207 MB →
+  39 MB); grain is brightness-only so it stays grain. Clips and edits still over 50 MB get a **Phone copy** (under
+  ~45 MB, same picture size, sound and length) made in the background; the card and the edit page offer it, Telegram
+  sends it instead of a too-big file, and it is made again whenever the clip changes.
+- **Edit words never over his face**: the edit renderer follows where his face is in every frame (zooms, punches,
+  shakes, a frame moved for a title) and puts the Motivation build-up words, punch/quote/meme text, subtitles and the
+  hook above his head or below his chin, smaller when needed — never over his eyes or mouth.
 - **Small facecam streams/reactions**: split screen with the face big on top (45% of the height) and the game/video
   below, captions at the seam; kept through re-renders, doctor fixes and undo.
 - **Tidy-ups**: test tools back in `tools/`, the icon in `static/`, READMEs restored, every test prints safely on
