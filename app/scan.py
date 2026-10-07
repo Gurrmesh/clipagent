@@ -1860,6 +1860,18 @@ def make_clips(moment_ids: Sequence[str], settings: Optional[Dict[str, Any]] = N
     return job_ids
 
 
+def resume_jobs(pairs: Sequence[Tuple[str, str]]) -> None:
+    """Moment jobs still waiting when ClipAgent closed: back in the queue, (job_id, moment_id) each.
+    They fetch only their moment's part of the video, never the whole video."""
+    pairs = [(j, m) for j, m in pairs if j and m]
+    if not pairs:
+        return
+    with _jobs_cv:
+        _jobs.extend(pairs)
+        _jobs_cv.notify()
+    _ensure_worker()
+
+
 def _ensure_worker() -> None:
     global _jobs_worker
     with _jobs_cv:

@@ -20,8 +20,8 @@ from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, U
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import (brandlogo, campaign, captions, doctor, downloads, edits, identity, instruct, media, money, notify, overlay,
-               pipeline, render, store, styles, transcribe)
+from . import (brandlogo, campaign, captions, catalog, creators, doctor, downloads, edits, identity, instruct, media,
+               money, notify, overlay, pipeline, render, scan, store, styles, transcribe)
 from .config import (ANTHROPIC_API_KEY, BASE_DIR, CLIP_DIR, MAX_CLIPS, THUMB_DIR,
                      WHISPER_API_KEY, WORK_DIR)
 
@@ -30,6 +30,7 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 store.init()
 money.init()
+creators.init()
 LOGO_PATH = render.BRAND_DIR / "logo.png"
 
 
