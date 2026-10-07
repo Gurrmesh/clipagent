@@ -1285,6 +1285,14 @@ def _loudness_gain(source: Path, tl: Timeline, target: float = -14.0) -> float:
 
 # --- the render -----------------------------------------------------------------------
 
+# x264 is led by quality (CRF) with a ceiling on top. Without one, busy pictures —
+# film grain above all, new noise every frame — made x264 spend 50-60 Mbps (a 28 s
+# edit came out at 180 MB). 11 Mbps on average, with a 22 Mbit buffer for the busy
+# seconds, keeps a 1080×1920 picture clean; TikTok, Reels and Shorts re-encode to
+# far less anyway. Ordinary talking-head clips stay well under it.
+VIDEO_CAP = ("-maxrate", "11M", "-bufsize", "22M")
+
+
 def _escape(path: Path) -> str:
     return str(path).replace("\\", "/").replace(":", r"\:")
 
@@ -1718,7 +1726,7 @@ def render_clip(
            "-filter_complex", ";".join(graph), "-map", vout]
     if audio_labels:
         cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", "160k", "-ar", "48000"]
-    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", *VIDEO_CAP, "-pix_fmt", "yuv420p",
             "-r", fps_str, "-g", str(2 * round(float(fps))), "-movflags", "+faststart",
             str(out_file)]
 

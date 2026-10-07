@@ -224,6 +224,134 @@ peak = [int(np.argmax(g[..., c].astype(np.float32).mean(axis=0))) for c in range
 expect(peak[1] in range(195, 205) and 8 <= abs(peak[0] - peak[1]) <= 18 and (peak[0] - peak[1]) * (peak[2] - peak[1]) < 0,
        f"the glitch moves blue and red opposite ways, green stays (columns {peak})")
 
+# --- big words never over his face; the file stays a sensible size ----------------------------
+print("== big words stay off his face (drawn faces high and low in the frame)")
+high = TMP / "face_high.mp4"                  # portrait, his face about a third of the way down
+low = TMP / "face_low.mp4"                    # the same kind of shot moved down: his face just below the middle
+subprocess.run([sys.executable, str(ROOT / "tools" / "make_test_footage.py"), "26", str(high), "--portrait",
+                "--seed", "2"], check=True)
+subprocess.run([sys.executable, str(ROOT / "tools" / "make_test_footage.py"), "26", str(TMP / "raw_low.mp4"),
+                "--portrait", "--seed", "5"], check=True)
+ff("-i", str(TMP / "raw_low.mp4"), "-vf", "crop=1080:1360:0:0,pad=1080:1920:0:560:color=0x46505c",
+   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy", str(low))
+face_src = {"H": {"source_path": str(high)}, "L": {"source_path": str(low)}}
+talk = {k: [{"w": w, "start": round(1.0 + i * 0.42, 2), "end": round(1.3 + i * 0.42, 2)}
+            for i, w in enumerate((("stay hungry and never stop because the work you put in today pays you "
+                                    "back for years so keep going ") * 6).split())]
+        for k in ("H", "L")}
+captured = {}
+_real_build_ass = editrender.build_ass
+
+
+def keep_ass(tl_, out_, face_=None):
+    made = _real_build_ass(tl_, out_, face_)
+    if made:
+        captured[tl_["style"]] = out_.read_text(encoding="utf-8")
+    return made
+
+
+editrender.build_ass = keep_ass
+
+
+def frames_of(inputs, vf="", w=540, h=960):
+    """Every frame (BGR, w×h) of what ffmpeg reads from `inputs`, one at a time."""
+    proc = subprocess.Popen(["ffmpeg", "-v", "error", *inputs, "-vf", (vf + "," if vf else "") + f"scale={w}:{h}",
+                             "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL)
+    size = w * h * 3
+    try:
+        while True:
+            buf = proc.stdout.read(size)
+            if len(buf) < size:
+                break
+            yield np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def words_vs_face(video, tl_, ass_text, name):
+    """Every frame with words on screen: where libass drew them (the words alone, on grey) against
+    the face the finder sees in the finished video. Returns (frames checked, frames where they overlap,
+    frames with words but no face found)."""
+    from app import framing
+    detect, _ = framing._detector()
+    ass_file = TMP / f"{name}.ass"
+    ass_file.write_text(ass_text, encoding="utf-8")
+    from app import motion
+    grey = ["-f", "lavfi", "-i", f"color=c=0x808080:s=540x960:r=30:d={tl_['length']:.3f}"]   # the words alone
+    grey_vf = f"subtitles='{motion._escape(ass_file)}':fontsdir='{motion._escape(editrender.FONTS_DIR)}'"
+    skip = set()                                   # flashes and dips: the finder can't see a face in white or black
+    for s in tl_["segments"]:
+        for f0 in s["flashes"]:
+            skip.update(range(int((s["at"] + f0) * 30) - 1, int((s["at"] + f0 + 0.25) * 30) + 2))
+        if s.get("dip_in"):
+            skip.update(range(int(s["at"] * 30), int((s["at"] + 0.2) * 30) + 1))
+        if s.get("dip_out"):
+            skip.update(range(int((s["at"] + s["dur"] - 0.2) * 30), int((s["at"] + s["dur"]) * 30) + 1))
+    checked, overlap, no_face = 0, [], 0
+    for n, (img, words) in enumerate(zip(frames_of(["-i", str(video)]), frames_of(grey, grey_vf))):
+        if n % 2 or n in skip:
+            continue
+        ink = np.abs(words.astype(np.int16) - 128).max(axis=2) > 10
+        rows = np.where(ink.any(axis=1))[0]
+        if not len(rows):
+            continue
+        found = [f for f in detect(img) if f[2] > 30]
+        if not found:
+            no_face += 1
+            continue
+        x, y, w, h = max(found, key=lambda f: f[2] * f[3])
+        fx0, fy0, fx1, fy1 = x - 0.04 * h, y - 0.04 * h, x + w + 0.04 * h, y + h * 1.04
+        checked += 1
+        bands = np.split(rows, np.where(np.diff(rows) > 6)[0] + 1)      # each block of words on its own
+        for band in bands:
+            cols = np.where(ink[band[0]:band[-1] + 1].any(axis=0))[0]
+            bx0, bx1, by0, by1 = cols.min(), cols.max(), band[0], band[-1]
+            if bx0 < fx1 and bx1 > fx0 and by0 < fy1 and by1 > fy0:
+                overlap.append(round(n / 30, 2))
+                break
+    return checked, overlap, no_face
+
+
+def face_case(style, moments, length, song_=None, hook="", effects=None):
+    tl_ = edits.build_timeline(moments, style, length, song_, effects or {}, talk, durations={"H": 26.0, "L": 26.0},
+                               hook=hook)
+    out_ = TMP / f"face_{style}.mp4"
+    editrender.render(tl_, face_src, song_, out_, TMP / f"face_{style}.jpg")
+    checked, overlap, no_face = words_vs_face(out_, tl_, captured.get(style, ""), style)
+    expect(checked >= 20 and not overlap,
+           f"{style}: words never over his face ({checked} frames with words checked, over the face at {overlap[:5]})")
+    expect(no_face <= max(2, checked // 10), f"{style}: his face is found under the words ({no_face} frames without)")
+    return tl_, out_
+
+
+mot_ms = [{"id": "a", "source": "L", "start": 1.0, "end": 8.4, "hit": 3.0, "text": "stay hungry", "key": "hungry",
+           "drop": False},
+          {"id": "b", "source": "H", "start": 9.0, "end": 16.4, "hit": 11.0, "text": "keep going", "key": "work",
+           "drop": True},
+          {"id": "c", "source": "L", "start": 17.0, "end": 24.4, "hit": 19.0, "text": "pays you back", "key": "years",
+           "drop": False}]
+tm, om = face_case("motivation", mot_ms, 20, hook="Seven years before it paid him back")
+kbps = int(json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=bit_rate", "-of", "json",
+                                      str(om)], capture_output=True, text=True).stdout)["format"]["bit_rate"]) / 1000
+expect(tm["effects"].get("grain") and tm["length"] >= 18 and kbps <= 12500,
+       f"a {tm['length']:.0f} s Motivation edit with grain is {kbps / 1000:.1f} Mbps (at most 12.5) — "
+       f"{om.stat().st_size / 1e6:.0f} MB")
+fun_ms = [{"id": f"f{i}", "source": "HL"[i % 2], "start": 1.5 + i * 7, "end": 6.5 + i * 7, "hit": 3.5 + i * 7,
+           "text": ["when the trade finally works", "me checking my account", "him at 4am"][i], "drop": i == 1}
+          for i in range(3)]
+face_case("funny", fun_ms, 15, hook="He was not ready for this")
+vel_ms = [{"id": f"v{i}", "source": "HL"[i % 2], "start": 1.0 + i * 4, "end": 4.0 + i * 4, "hit": 2.5 + i * 4,
+           "text": ["SEVEN YEARS", "STICK TO IT", "NO DAYS OFF", "STAY HUNGRY", "KEEP GOING", "PAY DAY"][i],
+           "drop": i == 3} for i in range(5)]
+face_case("velocity", vel_ms, 8, song, hook="Seven years to get here")
+editrender.build_ass = _real_build_ass
+for style, t in (("motivation", 6.0), ("motivation", 13.0), ("funny", 4.0), ("velocity", 5.0)):
+    ff("-ss", f"{t}", "-i", str(TMP / f"face_{style}.mp4"), "-frames:v", "1", "-q:v", "3",
+       str(TMP / f"look_{style}_{t:.0f}.jpg"))
+print(f"  look at the words and his face: {TMP / 'look_motivation_6.jpg'} (and look_*.jpg next to it)")
+
 print(f"\n  look at the frames: {out}  {outc}")
 print("\nall checks behaved" if not FAILS else f"\n{len(FAILS)} check(s) failed")
 sys.exit(1 if FAILS else 0)

@@ -133,19 +133,13 @@ def download_pause(paused: bool, waiting: int = 0) -> None:
 
 
 def _small_copy(path: Path, duration: float) -> Optional[Path]:
-    """A copy under Telegram's 50 MB limit, for clips that are bigger."""
-    if duration <= 0:
+    """The clip's phone copy (under 50 MB, the same one the page offers), for clips that are bigger."""
+    from . import postready
+    try:
+        return postready.make(path)
+    except Exception as exc:                       # never let this break the sender
+        print(f"[telegram] no phone copy of {path.name}: {exc}")
         return None
-    out = WORK_DIR / f"tg_{path.stem}.mp4"
-    kbps = int(MAX_UPLOAD * 8 / 1000 / duration * 0.92) - 160
-    if kbps < 300:
-        return None
-    proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(path), "-c:v", "libx264", "-preset", "veryfast",
-         "-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-bufsize", f"{kbps * 2}k",
-         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(out)],
-        capture_output=True)
-    return out if proc.returncode == 0 and out.exists() else None
 
 
 def _deliver(item: Dict[str, Any]) -> None:
@@ -155,26 +149,24 @@ def _deliver(item: Dict[str, Any]) -> None:
                               "disable_web_page_preview": "true"})
         return
     path = Path(item["path"])
-    temp = None
-    if path.stat().st_size > MAX_UPLOAD:
-        temp = _small_copy(path, item["duration"])
-        if not temp:
+    caption = item["caption"]
+    if path.stat().st_size > min(MAX_UPLOAD, 50_000_000):
+        # Bots can only send 50 MB: the phone copy goes instead (kept — the page offers it too).
+        small = _small_copy(path, item["duration"])
+        if not small or small.stat().st_size > MAX_UPLOAD:
             _call("sendMessage", {"chat_id": cid, "parse_mode": "HTML",
-                                  "text": item["caption"] + "\n\n<i>Too big to send here — "
+                                  "text": caption + "\n\n<i>Too big to send here — "
                                           "download it from ClipAgent.</i>"})
             return
-        path = temp
-    try:
-        data = {"chat_id": cid, "caption": item["caption"], "parse_mode": "HTML",
-                "supports_streaming": "true", "width": "1080", "height": "1920"}
-        if item["duration"]:
-            data["duration"] = str(int(round(item["duration"])))
-        with open(path, "rb") as fh:
-            # No custom thumbnail: Telegram takes the first frame, which is the hook.
-            _call("sendVideo", data, files={"video": (path.name, fh, "video/mp4")}, timeout=600)
-    finally:
-        if temp:
-            temp.unlink(missing_ok=True)
+        path = small
+        caption = (caption + "\n<i>Phone copy (smaller file, same video).</i>")[:1024]
+    data = {"chat_id": cid, "caption": caption, "parse_mode": "HTML",
+            "supports_streaming": "true", "width": "1080", "height": "1920"}
+    if item["duration"]:
+        data["duration"] = str(int(round(item["duration"])))
+    with open(path, "rb") as fh:
+        # No custom thumbnail: Telegram takes the first frame, which is the hook.
+        _call("sendVideo", data, files={"video": (path.name, fh, "video/mp4")}, timeout=600)
 
 
 def _sender() -> None:

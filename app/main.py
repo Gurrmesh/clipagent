@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 
 from . import (brandlogo, campaign, captions, doctor, downloads, edits, identity, instruct, media, money, notify, overlay,
-               pipeline, render, store, styles, transcribe)
+               pipeline, postready, render, store, styles, transcribe)
 from .config import (ANTHROPIC_API_KEY, BASE_DIR, CLIP_DIR, MAX_CLIPS, THUMB_DIR,
                      WHISPER_API_KEY, WORK_DIR)
 
@@ -81,6 +81,7 @@ def clip_json(clip: Dict[str, Any]) -> Dict[str, Any]:
         "doctor": _loads(clip.get("doctor"), None),
         "render_error": clip.get("render_error") or "",
         "can_undo": bool(clip.get("undo")),
+        "phone": postready.info(clip.get("file")),           # a smaller copy for phones when it's over 50 MB
     }
 
 
@@ -581,9 +582,11 @@ def ask_status(req_id: str) -> Dict[str, Any]:
 @app.post("/api/clips/{clip_id}/undo")
 def undo_clip(clip_id: str) -> Dict[str, Any]:
     try:
-        return clip_json(instruct.undo(clip_id))
+        clip = instruct.undo(clip_id)
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
+    postready.refresh(clip.get("file"))              # the phone copy of the version that's gone goes too
+    return clip_json(clip)
 
 
 @app.post("/api/clips/{clip_id}/text")
@@ -642,8 +645,18 @@ def clip_waveform(clip_id: str, pad: float = 8.0) -> Dict[str, Any]:
     }
 
 
+def _phone_file(path: Any, phone: bool) -> Optional[Path]:
+    """?phone=1: the smaller copy for phones (made now if it isn't ready yet); None = the full file."""
+    if not phone or not postready.needs_copy(path):
+        return None
+    try:
+        return postready.make(path)
+    except RuntimeError as exc:
+        raise HTTPException(500, f"Couldn't make the phone copy: {exc}. The full file still downloads.")
+
+
 @app.get("/api/clips/{clip_id}/download")
-def download(clip_id: str, anyway: bool = False) -> FileResponse:
+def download(clip_id: str, anyway: bool = False, phone: bool = False) -> FileResponse:
     clip = store.get_clip(clip_id)
     if not clip or not clip.get("file"):
         raise HTTPException(404, "Clip not rendered")
@@ -651,8 +664,9 @@ def download(clip_id: str, anyway: bool = False) -> FileResponse:
         summary = (_loads(clip.get("compliance"), {}) or {}).get("summary", "")
         raise HTTPException(409, f"The campaign check blocked this clip. {summary}")
     safe = media.safe_name(clip["title"] or "clip")
-    return FileResponse(clip["file"], media_type="video/mp4",
-                        filename=f"{clip['rank']:02d}_{safe}.mp4")
+    small = _phone_file(clip["file"], phone)
+    return FileResponse(small or clip["file"], media_type="video/mp4",
+                        filename=f"{clip['rank']:02d}_{safe}{'_phone' if small else ''}.mp4")
 
 
 # --- campaigns ------------------------------------------------------------
@@ -983,6 +997,7 @@ RIGHTS_NOTE = ("Use songs you're allowed to use. On TikTok and Reels you can als
 def _edit_out(e: Dict[str, Any]) -> Dict[str, Any]:
     out = edits.edit_json(e)
     out["error"] = friendly_error(out["error"]) if out["error"] else ""
+    out["phone"] = postready.info(e.get("file"))             # a smaller copy for phones when it's over 50 MB
     return out
 
 
@@ -1089,11 +1104,12 @@ def edit_detail(edit_id: str) -> Dict[str, Any]:
 
 @app.delete("/api/edits/{edit_id}")
 def remove_edit(edit_id: str) -> Dict[str, Any]:
-    _edit_or_404(edit_id)
+    e = _edit_or_404(edit_id)
     try:
         edits.delete(edit_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    postready.remove_stale(e.get("file"))            # its phone copy goes with it
     return {"ok": True}
 
 
@@ -1166,14 +1182,16 @@ def edit_moment_thumb(edit_id: str, name: str) -> FileResponse:
 
 
 @app.get("/api/edits/{edit_id}/download")
-def download_edit(edit_id: str, anyway: bool = False) -> FileResponse:
+def download_edit(edit_id: str, anyway: bool = False, phone: bool = False) -> FileResponse:
     e = _edit_or_404(edit_id)
     if not e.get("file") or not Path(e["file"]).is_file():
         raise HTTPException(404, "This edit isn't made yet")
     verdict = e.get("compliance") or {}
     if verdict.get("status") == "blocked" and not anyway:
         raise HTTPException(409, f"The campaign check blocked this edit. {verdict.get('summary', '')}")
-    return FileResponse(e["file"], media_type="video/mp4", filename=f"{media.safe_name(e['title'] or 'edit')}.mp4")
+    small = _phone_file(e["file"], phone)
+    return FileResponse(small or e["file"], media_type="video/mp4",
+                        filename=f"{media.safe_name(e['title'] or 'edit')}{'_phone' if small else ''}.mp4")
 
 
 # --- money: posts, earnings, planner, watched channels ---------------------------------

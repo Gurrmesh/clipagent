@@ -353,8 +353,9 @@ def _render_classic(
         else:
             cmd += ["-map", "0:a:0?"]
         cmd += ["-c:a", "aac", "-b:a", "128k", "-ar", "48000"]
+    from .motion import VIDEO_CAP          # the same bitrate ceiling as the seamless engine
     cmd += [
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", *VIDEO_CAP,
         "-pix_fmt", "yuv420p", "-r", str(FPS), "-g", str(FPS * 2),
         "-movflags", "+faststart", "-shortest", str(out_file),
     ]

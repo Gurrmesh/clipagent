@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import (brandlogo, notify, campaign, compliance, downloads, framing, highlights, judge, media, overlay, render,
                store, structure, styles, textdetect, tighten, transcribe)
-from . import doctor, lookcheck
+from . import doctor, lookcheck, postready
 
 
 def _frame_rate(source: Path):
@@ -561,6 +561,7 @@ def _run_overlay_job(job_id: str) -> None:
                                               edits.get("tone"), p["info"], look=seen)
             store.update_clip(clip_id, status="ready", compliance=json.dumps(result),
                               edits=json.dumps({**edits, **_made_fields(made), "campaign_look": seen}))
+            postready.refresh(made["file"])          # over 50 MB: a phone copy, in the background
 
         _stage(job_id, f"Rendering and checking {len(rows)} clips", 45)
         done = 0
@@ -869,6 +870,7 @@ def _run_job(job_id: str, url: Optional[str] = None, upload_path: Optional[Path]
                 # one re-render. Claude looks at the main versions; the runner-up
                 # versions — and clips the campaign look blocked — get the measured checks only.
                 doctor.treat(clip_id, rules, use_claude=not clip.get("alt_of") and not blocked)
+            postready.refresh(out["file"])           # over 50 MB: a phone copy, in the background
 
         _stage(job_id, f"Framing, rendering and checking {len(clip_ids)} clips", 80)
         done = 0
@@ -931,6 +933,7 @@ def rerender_overlay(clip_id: str, edits: Dict[str, Any]) -> Dict[str, Any]:
         edits=json.dumps({**current, **look, "hook": hook, "tone": tone, **_made_fields(made), "campaign_look": seen}),
     )
     store.update_job(clip["job_id"], stage=_campaign_stage(clip["job_id"]))
+    postready.refresh(made["file"])                  # the old phone copy goes; a new one if it's big
     return store.get_clip(clip_id)
 
 
@@ -1028,6 +1031,7 @@ def rerender_clip(clip_id: str, edits: Dict[str, Any]) -> Dict[str, Any]:
         if rules:
             _gate_source(rules, clip_id)
             store.update_job(clip["job_id"], stage=_campaign_stage(clip["job_id"]))
+        postready.refresh(out["file"])               # the old phone copy goes; a new one if it's big
         return store.get_clip(clip_id)
     if len(parts) > 1:
         store.update_clip(clip_id, variant="continuous")
@@ -1084,4 +1088,5 @@ def rerender_clip(clip_id: str, edits: Dict[str, Any]) -> Dict[str, Any]:
     if rules:
         _gate_source(rules, clip_id)
         store.update_job(clip["job_id"], stage=_campaign_stage(clip["job_id"]))
+    postready.refresh(out["file"])                   # the old phone copy goes; a new one if it's big
     return store.get_clip(clip_id)
